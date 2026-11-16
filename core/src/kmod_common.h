@@ -22,6 +22,14 @@ inline std::string ExternalFilesDir()
     return std::string("/sdcard/Android/data/") + kPackageName + "/files";
 }
 
+// The kmod data directory. It lives in the app's *media* folder, which (unlike Android/data) file managers and
+// editors can open, and which the game can read and write without any storage permission, including files that other
+// apps or adb put there. Other shared folders (Documents, Download) do not work: files not created by the game are unreadable.
+inline std::string KModRoot()
+{
+    return std::string("/sdcard/Android/media/") + kPackageName + "/kmod";
+}
+
 // Checked reference to a UObject: survives GC / world teardown by re-validating against GObjects.
 struct ObjRef
 {

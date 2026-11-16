@@ -1,6 +1,7 @@
 #include "kmod_log.h"
 
 #include <android/log.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -76,17 +77,71 @@ void KLog(KLogLevel level, const char* tag, const char* fmt, ...)
     KLogMsg(level, tag, buf);
 }
 
+// ---- one-time move of the old data directory (<files>/kmod) to the shared media folder ----
+namespace
+{
+bool CopyFileLocal(const std::string& from, const std::string& to)
+{
+    FILE* in = fopen(from.c_str(), "rb");
+    if (!in) return false;
+    FILE* out = fopen(to.c_str(), "wb");
+    if (!out) { fclose(in); return false; }
+    char buf[8192]; size_t n; bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+    fclose(in); if (fclose(out) != 0) ok = false;
+    return ok;
+}
+
+bool CopyTreeLocal(const std::string& from, const std::string& to)
+{
+    struct stat st;
+    if (stat(from.c_str(), &st) != 0) return false;
+    if (!S_ISDIR(st.st_mode)) return CopyFileLocal(from, to);
+    mkdir(to.c_str(), 0777);
+    DIR* d = opendir(from.c_str());
+    if (!d) return false;
+    bool ok = true;
+    while (dirent* e = readdir(d))
+    {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!CopyTreeLocal(from + "/" + e->d_name, to + "/" + e->d_name)) ok = false;
+    }
+    closedir(d);
+    return ok;
+}
+
+// returns a message for the log, or "" when there was nothing to do
+std::string MigrateLegacyRoot()
+{
+    std::string oldRoot = ExternalFilesDir() + "/kmod", newRoot = KModRoot();
+    struct stat st;
+    if (stat(oldRoot.c_str(), &st) != 0) return "";
+    if (stat((oldRoot + "/MOVED.txt").c_str(), &st) == 0) return "";                    // already done
+    if (stat((newRoot + "/mods").c_str(), &st) == 0 || stat((newRoot + "/state.json").c_str(), &st) == 0) return "";   // new dir already in use
+    std::string moved;
+    for (const char* name : {"mods", "data", "inbox", "state.json"})
+    {
+        std::string from = oldRoot + "/" + name, to = newRoot + "/" + name;
+        if (stat(from.c_str(), &st) != 0) continue;
+        if (rename(from.c_str(), to.c_str()) == 0 || CopyTreeLocal(from, to)) moved += std::string(moved.empty() ? "" : ", ") + name;
+    }
+    if (FILE* f = fopen((oldRoot + "/MOVED.txt").c_str(), "w"))
+    {
+        fprintf(f, "kmod now keeps its data in %s\n", newRoot.c_str());
+        fclose(f);
+    }
+    return moved.empty() ? "" : "moved " + moved + " from " + oldRoot + " to " + newRoot;
+}
+} // namespace
+
 void KLogInit()
 {
     std::lock_guard<std::mutex> lock(g_mu);
     if (g_inited) return;
     g_inited = true;
-    {   // one-time migration of the pre-rename data directory (CCB -> kmod)
-        struct stat st;
-        std::string oldDir = ExternalFilesDir() + "/CCB", newDir = ExternalFilesDir() + "/kmod";
-        if (stat(oldDir.c_str(), &st) == 0 && stat(newDir.c_str(), &st) != 0) rename(oldDir.c_str(), newDir.c_str());
-    }
-    g_dir = ExternalFilesDir() + "/kmod/logs";
+    MkdirAllLocal(KModRoot());
+    std::string migrated = MigrateLegacyRoot();
+    g_dir = KModRoot() + "/logs";
     MkdirAllLocal(g_dir);
 
     // rotate: kmod.log -> kmod.1.log -> ... -> kmod.(N-1).log, oldest dropped
@@ -101,7 +156,8 @@ void KLogInit()
     WriteLine(KLOG_INFO, "kmod", "package " + std::string(kPackageName) + ", pid " + std::to_string(getpid()));
     WriteLine(KLOG_INFO, "kmod", "device " + Prop("ro.product.manufacturer") + " " + Prop("ro.product.model") + ", Android " +
                                       Prop("ro.build.version.release") + " (API " + Prop("ro.build.version.sdk") + "), abi " + Prop("ro.product.cpu.abi"));
-    WriteLine(KLOG_INFO, "kmod", "log dir " + g_dir);
+    WriteLine(KLOG_INFO, "kmod", "data dir " + KModRoot());
+    if (!migrated.empty()) WriteLine(KLOG_INFO, "kmod", migrated);
 }
 
 // ------------------------------------------------------------------------------------------------

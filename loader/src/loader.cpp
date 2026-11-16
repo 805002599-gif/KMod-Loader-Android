@@ -36,13 +36,13 @@ static bool CopyFile(const char* from, const char* to)
 }
 
 #ifdef KMOD_DEV
-// DEV build only: if <externalFiles>/kmod/dev/libkmodcore.so exists, copy it into the private dir and load that
+// DEV build only: if <root>/kmod/dev/libkmodcore.so (Android/media/<pkg>/kmod/dev/) exists, copy it into the private dir and load that
 // (so core changes need only an adb push + restart, not a 1.2 GB reinstall). Otherwise load the bundled core.
 static void LoadCore()
 {
     const char* pkg = "com.android1939.kardsapk";
     char src[256], dir[256], dst[300];
-    snprintf(src, sizeof(src), "/sdcard/Android/data/%s/files/kmod/dev/libkmodcore.so", pkg);
+    snprintf(src, sizeof(src), "/sdcard/Android/media/%s/kmod/dev/libkmodcore.so", pkg);
     snprintf(dir, sizeof(dir), "/data/data/%s/files/kmod", pkg);
     snprintf(dst, sizeof(dst), "%s/libkmodcore.so", dir);
 

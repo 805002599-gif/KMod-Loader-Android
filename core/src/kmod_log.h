@@ -1,7 +1,7 @@
 // kmod logging: logcat + a rotating log file, plus a native crash handler that writes the fatal signal and a backtrace.
 //
-//   <files>/kmod/logs/kmod.log      current run
-//   <files>/kmod/logs/kmod.1.log    previous run ... kmod.4.log (the 5 most recent runs are kept)
+//   <root>/logs/kmod.log      current run
+//   <root>/logs/kmod.1.log    previous run ... kmod.4.log (the 5 most recent runs are kept)
 //
 // File line format:  2026-11-16 12:34:56.789 I/lua: message        (D/I/W/E)
 // Level filter: dev builds log DEBUG and up, release builds INFO and up.

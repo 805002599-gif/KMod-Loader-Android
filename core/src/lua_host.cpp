@@ -1032,10 +1032,10 @@ void RunHooks(UObject* self, UFunction* fn, void* parms, bool post)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Mod loader: <files>/kmod/mods/<ModName>/Scripts/main.lua ; enabled when <ModName>/enabled.txt exists (UE4SS layout)
+// Directories: <KModRoot>/mods, <KModRoot>/dev (see KModRoot in kmod_common.h)
 // ---------------------------------------------------------------------------------------------
-std::string ModsDir() { return ExternalFilesDir() + "/kmod/mods"; }
-std::string DevDir() { return ExternalFilesDir() + "/kmod/dev"; }
+std::string ModsDir() { return KModRoot() + "/mods"; }
+std::string DevDir() { return KModRoot() + "/dev"; }
 
 bool FileExists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0; }
 
@@ -1062,7 +1062,7 @@ void CallLoadMods()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Dev console: runs <files>/kmod/dev/console.lua whenever it changes, writes console.out
+// Dev console: runs <root>/dev/console.lua whenever it changes, writes console.out
 // ---------------------------------------------------------------------------------------------
 time_t g_consoleMtime = 0;
 double g_nextConsoleCheck = 0;
@@ -1253,10 +1253,10 @@ int Ccb_Unzip(lua_State* L)    // ok, err = kmod.unzip(zipPath, destDir)
     return 2;
 }
 
-int Ccb_Rmtree(lua_State* L)   // only inside <files>/kmod/
+int Ccb_Rmtree(lua_State* L)   // only inside <root>/
 {
     std::string path = luaL_checkstring(L, 1);
-    std::string root = ExternalFilesDir() + "/kmod/";
+    std::string root = KModRoot() + "/";
     if (path.compare(0, root.size(), root) != 0 || path.find("..") != std::string::npos) return luaL_error(L, "rmtree: refusing path %s", path.c_str());
     RmTree(path);
     return 0;
@@ -1442,13 +1442,14 @@ void LuaHost_Init()
     lua_pushstring(L, KMOD_FLAVOR); lua_setfield(L, -2, "flavor");
     lua_pushinteger(L, KMOD_API_LEVEL); lua_setfield(L, -2, "api");
     lua_newtable(L);
-    lua_pushstring(L, ExternalFilesDir().c_str()); lua_setfield(L, -2, "files");
+    lua_pushstring(L, ExternalFilesDir().c_str()); lua_setfield(L, -2, "files");        // legacy app files dir
+    lua_pushstring(L, KModRoot().c_str()); lua_setfield(L, -2, "root");
     lua_pushstring(L, ModsDir().c_str()); lua_setfield(L, -2, "mods");
     lua_pushstring(L, DevDir().c_str()); lua_setfield(L, -2, "dev");
     lua_pushstring(L, KLogDir().c_str()); lua_setfield(L, -2, "logs");
     lua_setfield(L, -2, "paths");
     lua_pop(L, 1);
-    mkdir((ExternalFilesDir() + "/kmod").c_str(), 0777);
+    mkdir(KModRoot().c_str(), 0777);
     mkdir(ModsDir().c_str(), 0777);
     if (kDevBuild) mkdir(DevDir().c_str(), 0777);
 

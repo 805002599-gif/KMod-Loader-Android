@@ -56,8 +56,8 @@ adb logcat -s KModCore KModLoader
 把 Lua 脚本写进 `kmod/dev/console.lua`，**文件一变化就会执行**（启动时也会执行一次现有的文件）。输出写到 `kmod/dev/console.out`。适合用 `adb push` 反复迭代：
 
 ```bash
-adb push console.lua /sdcard/Android/data/com.android1939.kardsapk/files/kmod/dev/console.lua
-adb shell cat /sdcard/Android/data/com.android1939.kardsapk/files/kmod/dev/console.out
+adb push console.lua /sdcard/Android/media/com.android1939.kardsapk/kmod/dev/console.lua
+adb shell cat /sdcard/Android/media/com.android1939.kardsapk/kmod/dev/console.out
 ```
 
 `console.lua` 里 `print` 的内容会进入 `console.out`。它在启动时也会跑，别忘了测完删掉。

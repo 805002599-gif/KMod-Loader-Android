@@ -1,4 +1,4 @@
--- kmod built-in mod loader (runs as a built-in script, owner ""). Implements the mod pack format v1 (docs/MODPACK_FORMAT.md):
+-- kmod built-in mod loader (runs as a built-in script, owner ""). Implements the mod pack format v1:
 --   kmod/mods/<id>/{mod.json, main.lua, lang/<tag>.json}   installed packages (read only)
 --   kmod/data/<id>/settings.json                           user settings
 --   kmod/state.json                                        {"enabled":[ids], "language":"auto"}
@@ -7,7 +7,7 @@
 -- lang_current, game_language, rec_text, mod_title, setting_label, option_label, t.
 
 local P = kmod.paths
-P.root = P.files .. "/kmod"
+P.root = P.root or (P.files .. "/kmod")        -- set natively: the shared media folder
 P.data = P.root .. "/data"
 P.inbox = P.root .. "/inbox"
 P.state = P.root .. "/state.json"
