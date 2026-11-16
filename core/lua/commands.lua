@@ -406,6 +406,7 @@ local API_STUB = [==[
 ---@field GetPathName fun(self: KObject): string
 ---@field GetClass fun(self: KObject): KObject
 ---@field GetOuter fun(self: KObject): KObject
+---@field GetDefaultObject fun(self: KObject): KObject
 ---@field IsA fun(self: KObject, class: string|KObject): boolean
 ---@field GetPropertyValue fun(self: KObject, name: string): any
 ---@field SetPropertyValue fun(self: KObject, name: string, value: any)
@@ -529,7 +530,29 @@ function LoopAsync(ms, fn) end
 ---@generic T
 ---@param className `T`
 ---@param fn fun(obj: T)
-function NotifyOnNewObject(className, fn) end
+function NotifyOnNewObject(className, fn, fast) end
+
+---@param ms number
+---@param fn fun(): boolean?
+function FastLoop(ms, fn) end
+
+---@param fn fun()
+function ExecuteAsync(fn) end
+
+---@class KWorker
+local KWorker = {}
+---@param msg any nil/boolean/number/string/table only
+function KWorker:post(msg) end
+---@param fn fun(msg: any)
+---@return KWorker
+function KWorker:onMessage(fn) return self end
+---@return boolean
+function KWorker:alive() end
+function KWorker:close() end
+
+---@param file string script path relative to the mod folder
+---@return KWorker
+function Worker(file) end
 ]==]
 
 local LUARC = [==[

@@ -6,6 +6,8 @@ namespace SDK { class UObject; class UFunction; }
 
 void LuaHost_Init();                                   // game thread; create state, register API, load mods
 void LuaHost_Tick(double now);                         // game thread; timers, queued callbacks, dev console
+void LuaHost_FastTick(double now);                     // game thread; FastLoop timers and the fast new-object scan (every few ms)
+bool LuaHost_HasFast();
 bool LuaHost_HasHook(SDK::UFunction* fn);              // cheap check used by the ProcessEvent detour
 void LuaHost_PreHook(SDK::UObject* self, SDK::UFunction* fn, void* parms);
 void LuaHost_PostHook(SDK::UObject* self, SDK::UFunction* fn, void* parms);

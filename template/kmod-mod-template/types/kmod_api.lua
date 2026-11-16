@@ -132,4 +132,26 @@ function LoopAsync(ms, fn) end
 ---@generic T : KObject
 ---@param className `T`
 ---@param fn fun(obj: T)
-function NotifyOnNewObject(className, fn) end
+function NotifyOnNewObject(className, fn, fast) end
+
+---@param ms number
+---@param fn fun(): boolean?
+function FastLoop(ms, fn) end
+
+---@param fn fun()
+function ExecuteAsync(fn) end
+
+---@class KWorker
+local KWorker = {}
+---@param msg any nil/boolean/number/string/table only
+function KWorker:post(msg) end
+---@param fn fun(msg: any)
+---@return KWorker
+function KWorker:onMessage(fn) return self end
+---@return boolean
+function KWorker:alive() end
+function KWorker:close() end
+
+---@param file string script path relative to the mod folder
+---@return KWorker
+function Worker(file) end

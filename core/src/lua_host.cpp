@@ -31,6 +31,8 @@ extern "C" {
 #include "modloader_lua.h"    // generated from lua/modloader.lua  (kModLoaderLua)
 #include "modmanager_lua.h"   // generated from lua/modmanager.lua (kModManagerLua)
 #include "commands_lua.h"       // generated from lua/commands.lua (kCommandsLua)
+#include "json_lua.h"           // generated from lua/json.lua (kJsonLua)
+#include "lua_worker.h"
 
 using namespace SDK;
 
@@ -441,6 +443,14 @@ std::string PathOf(UObject* o)
     return path;
 }
 int M_GetPathName(lua_State* L) { UObject* o = CheckObj(L, 1); lua_pushstring(L, PathOf(o).c_str()); return 1; }
+// classObject:GetDefaultObject() -> the class default object (CDO), invalid for non-classes
+int M_GetDefaultObject(lua_State* L)
+{
+    UObject* o = CheckObj(L, 1);
+    UObject* cdo = o->IsA(UClass::StaticClass()) ? static_cast<UClass*>(o)->ClassDefaultObject : nullptr;
+    PushObject(L, cdo);
+    return 1;
+}
 int M_GetClass(lua_State* L) { UObject* o = CheckObj(L, 1); PushObject(L, o->Class); return 1; }
 int M_GetOuter(lua_State* L) { UObject* o = CheckObj(L, 1); PushObject(L, o->Outer); return 1; }
 int M_GetAddress(lua_State* L) { UObject* o = CheckObj(L, 1); lua_pushinteger(L, (lua_Integer)(uintptr_t)o); return 1; }
@@ -592,7 +602,7 @@ int M_CallFunction(lua_State* L)   // obj:CallFunction("Name", args...)
 
 const luaL_Reg kObjectMethods[] = {
     {"IsValid", M_IsValid}, {"GetFullName", M_GetFullName}, {"GetName", M_GetName}, {"GetFName", M_GetName},
-    {"GetClass", M_GetClass}, {"GetPathName", M_GetPathName}, {"GetOuter", M_GetOuter}, {"GetAddress", M_GetAddress}, {"IsA", M_IsA},
+    {"GetClass", M_GetClass}, {"GetDefaultObject", M_GetDefaultObject}, {"GetPathName", M_GetPathName}, {"GetOuter", M_GetOuter}, {"GetAddress", M_GetAddress}, {"IsA", M_IsA},
     {"GetPropertyValue", M_GetPropertyValue}, {"SetPropertyValue", M_SetPropertyValue}, {"CallFunction", M_CallFunction},
     {"GetProperties", M_GetProperties}, {"GetFunctions", M_GetFunctions}, {nullptr, nullptr}};
 
@@ -1035,9 +1045,18 @@ struct Timer { double due; int fnRef; double repeatSec; bool loop; std::string o
 std::vector<Timer> g_timers;
 double g_now = 0;
 
-struct NewObjWatch { std::string cls; UClass* c; int fnRef; std::string owner; };
+struct NewObjWatch { std::string cls; UClass* c; int fnRef; std::string owner; bool fast; };
+bool g_anyFastWatch = false;                 // some watch asked for the fast scan (every ~16 ms instead of every 50 ms)
+double g_nextFastScan = 0;
+
+struct FastTimer { double due; int fnRef; double period; std::string owner; };
+std::vector<FastTimer> g_fastTimers;
+double FastNow() { timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
 std::vector<NewObjWatch> g_newObjWatches;
 int32_t g_lastObjCount = 0;
+struct SlotSeen { UObject* p = nullptr; int32_t serial = 0; };
+std::vector<SlotSeen> g_slotSeen;
+inline int32_t SlotSerial(FUObjectItem* it) { return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 0x10); }   // FUObjectItem::SerialNumber
 
 // Per-mod wrappers carry the mod name as upvalue 1 so a mod's hooks/timers can be dropped when it is disabled.
 std::string Owner(lua_State* L)
@@ -1092,6 +1111,11 @@ int G_ExecuteInGameThread(lua_State* L)
     return 0;
 }
 
+int G_ExecuteAsync(lua_State* L)   // UE4SS name; kmod runs it on the game thread at the next tick (use Worker for real parallel work)
+{
+    return G_ExecuteInGameThread(L);
+}
+
 int G_LoopAsync(lua_State* L)   // LoopAsync(ms, fn): repeats until fn returns true
 {
     double ms = luaL_checknumber(L, 1);
@@ -1106,7 +1130,21 @@ int G_NotifyOnNewObject(lua_State* L)
     std::string cn = luaL_checkstring(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
     lua_pushvalue(L, 2);
-    g_newObjWatches.push_back({cn, nullptr, luaL_ref(L, LUA_REGISTRYINDEX), Owner(L)});
+    bool fast = lua_toboolean(L, 3) != 0;                        // NotifyOnNewObject(class, fn, fast)
+    g_newObjWatches.push_back({cn, nullptr, luaL_ref(L, LUA_REGISTRYINDEX), Owner(L), fast});
+    if (fast) g_anyFastWatch = true;
+    return 0;
+}
+
+// FastLoop(ms, fn): like LoopAsync, but fn runs every few milliseconds on the game thread (not only 20 times a second):
+// use it for tiny checks that must happen before the next frame is drawn. ms is clamped to >= 2. Return true to stop.
+int G_FastLoop(lua_State* L)
+{
+    double ms = luaL_checknumber(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (ms < 2) ms = 2;
+    lua_pushvalue(L, 2);
+    g_fastTimers.push_back({FastNow() + ms / 1000.0, luaL_ref(L, LUA_REGISTRYINDEX), ms / 1000.0, Owner(L)});
     return 0;
 }
 
@@ -1408,7 +1446,7 @@ int Ccb_ModApi(lua_State* L)   // kmod.mod_api(modId) -> owner-tagged RegisterHo
     lua_newtable(L);
     static const struct { const char* n; lua_CFunction f; } reg[] = {
         {"RegisterHook", G_RegisterHook}, {"ExecuteWithDelay", G_ExecuteWithDelay}, {"ExecuteInGameThread", G_ExecuteInGameThread},
-        {"LoopAsync", G_LoopAsync}, {"NotifyOnNewObject", G_NotifyOnNewObject}};
+        {"LoopAsync", G_LoopAsync}, {"NotifyOnNewObject", G_NotifyOnNewObject}, {"FastLoop", G_FastLoop}, {"ExecuteAsync", G_ExecuteAsync}};
     for (auto& r : reg) { lua_pushstring(L, name); lua_pushcclosure(L, r.f, 1); lua_setfield(L, -2, r.n); }
     return 1;
 }
@@ -1548,7 +1586,8 @@ void LuaHost_Init()
         {"StaticFindObject", G_StaticFindObject}, {"FindObject", G_FindObject}, {"CreateInvalidObject", G_CreateInvalidObject},
         {"LoadAsset", G_LoadAsset},
         {"RegisterHook", G_RegisterHook}, {"UnregisterHook", G_UnregisterHook}, {"ExecuteWithDelay", G_ExecuteWithDelay},
-        {"ExecuteInGameThread", G_ExecuteInGameThread}, {"LoopAsync", G_LoopAsync}, {"NotifyOnNewObject", G_NotifyOnNewObject},
+        {"ExecuteInGameThread", G_ExecuteInGameThread}, {"LoopAsync", G_LoopAsync}, {"NotifyOnNewObject", G_NotifyOnNewObject}, {"FastLoop", G_FastLoop},
+        {"ExecuteAsync", G_ExecuteAsync},
         {nullptr, nullptr}};
     lua_pushglobaltable(L);
     luaL_setfuncs(L, globals, 0);
@@ -1563,7 +1602,22 @@ void LuaHost_Init()
     }
     else { EmitLine(std::string("[error] prelude: ") + lua_tostring(L, -1)); lua_pop(L, 1); }
 
+    {   // shared JSON codec: kmod.json (main state) and the global `json` inside workers
+        static const WorkerHooks wh = {
+            [](const std::string& s) { EmitLine(s); },
+            [](lua_State* S, int na, int nr, const char* what, const std::string& owner) { return PCall(S, na, nr, what, owner); },
+            [](lua_State* S, const std::string& owner, const std::string& msg) { ReportModError(S, owner, msg); }};
+        Worker_Init(L, wh, kJsonLua);
+        if (luaL_loadbuffer(L, kJsonLua, strlen(kJsonLua), "=json") == LUA_OK && lua_pcall(L, 0, 1, 0) == LUA_OK)
+        {
+            lua_getglobal(L, "kmod");
+            lua_pushvalue(L, -2); lua_setfield(L, -2, "json");
+            lua_pop(L, 2);
+        }
+        else { EmitLine(std::string("[error] json: ") + (lua_tostring(L, -1) ? lua_tostring(L, -1) : "?")); lua_pop(L, 1); }
+    }
     lua_getglobal(L, "kmod");
+    lua_pushcfunction(L, Worker_Create); lua_setfield(L, -2, "worker");
     lua_pushcfunction(L, Ccb_ListDir); lua_setfield(L, -2, "listdir");
     lua_pushcfunction(L, Ccb_Exists); lua_setfield(L, -2, "exists");
     lua_pushcfunction(L, Ccb_Mkdir); lua_setfield(L, -2, "mkdir");
@@ -1607,7 +1661,17 @@ void LuaHost_Init()
         }
     }
 
-    g_lastObjCount = InSDKUtils::GetGObjects()->Num();
+    {   // everything that exists now counts as "seen": NotifyOnNewObject only reports objects created from here on
+        TUObjectArray* a = InSDKUtils::GetGObjects();
+        int32_t cnt = a->Num();
+        g_lastObjCount = cnt;
+        g_slotSeen.assign(cnt, SlotSeen{});
+        for (int32_t i = 0; i < cnt; i++)
+        {
+            FUObjectItem* it = ObjRef::ItemAt(i);
+            if (it) { g_slotSeen[i].p = it->Object; g_slotSeen[i].serial = SlotSerial(it); }
+        }
+    }
     EmitLine(std::string("kmod ") + KMOD_VERSION + " (" + KMOD_FLAVOR + "): Lua host ready (" + LUA_VERSION + ")");
     KLogInstallCrashHandlers();
     CallLoadMods();
@@ -1617,6 +1681,7 @@ void LuaHost_ReloadMods()
 {
     // drop everything registered by user mods (owner != ""); built-in scripts (owner "") stay
     if (!L_) return;
+    Worker_CloseUser(L_);
     for (auto& kv : g_hooks)
     {
         auto& v = kv.second;
@@ -1628,6 +1693,10 @@ void LuaHost_ReloadMods()
         if (!g_timers[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, g_timers[i].fnRef); g_timers.erase(g_timers.begin() + i); } else i++;
     for (size_t i = 0; i < g_newObjWatches.size();)
         if (!g_newObjWatches[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, g_newObjWatches[i].fnRef); g_newObjWatches.erase(g_newObjWatches.begin() + i); } else i++;
+    for (size_t i = 0; i < g_fastTimers.size();)
+        if (!g_fastTimers[i].owner.empty()) { luaL_unref(L_, LUA_REGISTRYINDEX, g_fastTimers[i].fnRef); g_fastTimers.erase(g_fastTimers.begin() + i); } else i++;
+    g_anyFastWatch = false;
+    for (auto& w : g_newObjWatches) if (w.fast) g_anyFastWatch = true;
     EmitLine("[mod] reloading mods");
     CallLoadMods();
 }
@@ -1635,6 +1704,62 @@ void LuaHost_ReloadMods()
 bool LuaHost_HasHook(UFunction* fn) { return !g_hooks.empty() && g_hooks.count(fn) != 0; }
 void LuaHost_PreHook(UObject* self, UFunction* fn, void* parms) { RunHooks(self, fn, parms, false); }
 void LuaHost_PostHook(UObject* self, UFunction* fn, void* parms) { RunHooks(self, fn, parms, true); }
+
+// New-object watches: compare every GObjects slot with what we saw last time. The engine REUSES freed slots, so a
+// new object is not only "a slot past the old end": its (pointer, serial number) pair has to differ from before.
+static void ScanNewObjects()
+{
+    if (g_newObjWatches.empty() || !L_) return;
+    TUObjectArray* a = InSDKUtils::GetGObjects();
+    int32_t cnt = a->Num();
+    if ((int32_t)g_slotSeen.size() < cnt) g_slotSeen.resize(cnt);
+    for (int32_t i = 0; i < cnt; i++)
+    {
+        FUObjectItem* it = ObjRef::ItemAt(i);
+        UObject* o = it ? it->Object : nullptr;
+        int32_t sn = it ? SlotSerial(it) : 0;
+        SlotSeen& seen = g_slotSeen[i];
+        if (o == seen.p && sn == seen.serial) continue;
+        if (o && (!ObjRef::ItemUsable(it) || !o->Class)) continue;      // not fully set up yet: look again next time
+        seen.p = o; seen.serial = sn;
+        if (!o) continue;
+        for (size_t wi = 0; wi < g_newObjWatches.size(); wi++)          // by index: a callback may register more watches
+        {
+            NewObjWatch& w = g_newObjWatches[wi];
+            if (!w.c) w.c = FindClassCached(w.cls);
+            if (w.c && !IsCDO(o) && o->IsA(w.c))
+            {
+                lua_rawgeti(L_, LUA_REGISTRYINDEX, w.fnRef);
+                PushObject(L_, o);
+                PCall(L_, 1, 0, "NotifyOnNewObject", w.owner);
+            }
+        }
+    }
+    g_lastObjCount = cnt;
+}
+
+// Fast lane, called from the ProcessEvent hook every few milliseconds (see core.cpp): FastLoop timers and, when a watch
+// asked for it, the new-object scan at ~60 Hz.
+bool LuaHost_HasFast() { return !g_fastTimers.empty() || g_anyFastWatch; }
+void LuaHost_FastTick(double now)
+{
+    if (!L_) return;
+    if (!g_fastTimers.empty())
+    {
+        std::vector<FastTimer> due, keep;
+        for (auto& t : g_fastTimers) (t.due <= now ? due : keep).push_back(t);
+        g_fastTimers = keep;
+        for (auto& t : due)
+        {
+            lua_rawgeti(L_, LUA_REGISTRYINDEX, t.fnRef);
+            bool stop = true;
+            if (PCall(L_, 0, 1, "fast loop", t.owner)) { stop = lua_toboolean(L_, -1) != 0; lua_pop(L_, 1); }
+            if (!stop) { FastTimer n = t; n.due = now + t.period; g_fastTimers.push_back(n); }
+            else luaL_unref(L_, LUA_REGISTRYINDEX, t.fnRef);
+        }
+    }
+    if (g_anyFastWatch && now >= g_nextFastScan) { g_nextFastScan = now + 0.016; ScanNewObjects(); }
+}
 
 void LuaHost_Tick(double now)
 {
@@ -1654,29 +1779,9 @@ void LuaHost_Tick(double now)
         else luaL_unref(L_, LUA_REGISTRYINDEX, t.fnRef);
     }
 
-    // new-object watches (poll newly allocated GObjects slots)
-    if (!g_newObjWatches.empty())
-    {
-        TUObjectArray* a = InSDKUtils::GetGObjects();
-        int32_t cnt = a->Num();
-        for (int32_t i = g_lastObjCount; i < cnt; i++)
-        {
-            FUObjectItem* it = ObjRef::ItemAt(i);
-            UObject* o = it ? it->Object : nullptr;
-            if (!o || !ObjRef::ItemUsable(it) || !o->Class) continue;
-            for (auto& w : g_newObjWatches)
-            {
-                if (!w.c) w.c = FindClassCached(w.cls);
-                if (w.c && !IsCDO(o) && o->IsA(w.c))
-                {
-                    lua_rawgeti(L_, LUA_REGISTRYINDEX, w.fnRef);
-                    PushObject(L_, o);
-                    PCall(L_, 1, 0, "NotifyOnNewObject", w.owner);
-                }
-            }
-        }
-        g_lastObjCount = cnt;
-    }
+    Worker_Pump(L_);
+
+    if (!g_anyFastWatch) ScanNewObjects();        // with a fast watch the scan runs from LuaHost_FastTick instead
 
     if (kDevBuild)
     {

@@ -119,6 +119,14 @@ static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
     static double lastTick = 0;
     if ((++g_peCalls & 0x0F) != 0) return;
     double now = NowSec();
+    static double lastFast = 0;
+    if (LuaHost_HasFast() && now - lastFast >= 0.004)          // fast lane (FastLoop): every few ms, only when a mod asked for it
+    {
+        lastFast = now;
+        t_busy = true;
+        LuaHost_FastTick(now);
+        t_busy = false;
+    }
     if (now - lastTick < 0.05) return; // ~20 Hz
     lastTick = now;
 

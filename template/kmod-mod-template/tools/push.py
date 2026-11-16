@@ -38,7 +38,8 @@ def main():
         return
 
     adb("shell", f"rm -f {ROOT}/dev/console.out")
-    script = f'kmod.console_exec("enable {mod_id}")\nkmod.console_exec("mods")\nprint("--done--")\n'
+    # the dev build runs console.lua at every start, so the script deletes itself first
+    script = f'os.remove(kmod.paths.dev .. "/console.lua")\nkmod.console_exec("enable {mod_id}")\nkmod.console_exec("mods")\nprint("--done--")\n'
     with tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False, encoding="utf-8") as f:
         f.write(script)
         local = f.name
