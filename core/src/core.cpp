@@ -2,6 +2,7 @@
 // and builds a minimal "Mods" button + panel with UMG widgets created at runtime.
 #include <android/log.h>
 #include <dirent.h>
+#include <strings.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -24,6 +25,8 @@
 #include "kmod_log.h"
 #include "kmod_version.h"
 #include "lua_host.h"
+#include "resolver.h"
+#include "kmod_boot.h"
 #include "Basic.hpp"
 #include "CoreUObject_classes.hpp"
 #include "Engine_classes.hpp"
@@ -106,6 +109,7 @@ static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
         char name[32] = {};
         pthread_getname_np(pthread_self(), name, sizeof(name));
         t_gameThread = (strcmp(name, "GameThread") == 0) ? 1 : 0;
+        if (t_gameThread == 1) KBoot_SetGameThread((int)gettid());
         Log("ProcessEvent first seen on thread '%s' tid=%d -> gameThread=%d", name, (int)gettid(), t_gameThread);
     }
 
@@ -138,15 +142,16 @@ static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Pak mounting: kmod/paks/*.pak are mounted through the game's own "mount" console command (see paks in modloader.lua).
-// The engine picks the pak order from the path, which would put our paks BELOW the game's own, so the real mount
-// function (FPakPlatformFile mount worker, called with {path, order, ...} in x1) is hooked and the order is raised for
-// paks that live in kmod/paks. Offset is for libUnreal.so of KARDS 1.61.27596 (checked by its first instruction).
+// Pak mounting: kmod/paks/*.pak are mounted by calling the engine's own mount entry (HandleMountPakDelegate, bound to
+// FCoreDelegates::MountPak). The engine picks the pak order from the path, which would put our paks BELOW the game's own,
+// so the real mount worker (called with {path, order, ...} in x1) is hooked and the order is raised for paks that live in
+// kmod/paks. All addresses are found at run time by resolver.cpp (no per-build offsets).
 // ---------------------------------------------------------------------------------------------
-static const uintptr_t kPakMountVA = 0x4dc30f0;
 using PakMountFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static PakMountFn g_origPakMount = nullptr;
 static std::atomic<int> g_pakMounts{0};
+static PakAddrs g_pak;
+static bool g_pakTried = false, g_pakReady = false;
 
 static bool WidePrefix(const char16_t* w, const std::string& prefix)
 {
@@ -175,65 +180,87 @@ static uint64_t HookedPakMount(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a
     return g_origPakMount(a0, a1, a2, a3, a4, a5, a6, a7);
 }
 
-// The pak layer's "mount" entry (HandleMountPakDelegate(this, const FString& path, int32 order)) is not reachable from
-// the console in a shipping build, and we do not have its `this`. The engine binds it to FCoreDelegates::MountPak with
-// a small delegate object { vtable, ?, handle, this, function }; find that object in memory once and take `this` from it.
-static const uintptr_t kPakMountDelegateVT = 0x92982e0;     // vtable (value stored in the delegate object)
-static const uintptr_t kPakMountDelegateFn = 0x4dc0218;     // the bound function
-static void* g_pakFile = nullptr;
-
-static void* FindPakFile(uintptr_t base)
+static bool EnsurePak(uintptr_t base)
 {
-    FILE* maps = fopen("/proc/self/maps", "r");
-    if (!maps) { Log("pak mount: cannot read /proc/self/maps errno=%d", errno); return nullptr; }
-    const uint64_t vt = base + kPakMountDelegateVT, fn = base + kPakMountDelegateFn;
-    std::vector<uint8_t> buf(1 << 20);
-    void* found = nullptr;
-    char line[512];
-    size_t scanned = 0, regions = 0, vtOnly = 0;
-    while (!found && fgets(line, sizeof(line), maps))
-    {
-        unsigned long lo, hi; char perms[8] = {}; int nameAt = 0;
-        if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &lo, &hi, perms, &nameAt) < 3) continue;
-        if (perms[0] != 'r' || perms[1] != 'w' || perms[3] != 'p') continue;
-        if (strstr(line, ".so") || strstr(line, "/system/") || strstr(line, "/apex/") || strstr(line, "/dev/")) continue;
-        regions++;
-        for (unsigned long a = lo; a < hi && !found; a += buf.size())
-        {
-            size_t want = std::min<unsigned long>(buf.size(), hi - a);
-            struct iovec lv = {buf.data(), want}, rv = {reinterpret_cast<void*>(a), want};
-            ssize_t got = process_vm_readv(getpid(), &lv, 1, &rv, 1, 0);      // fails (instead of crashing) on unreadable memory
-            if (got < 0x28) continue;
-            scanned += got;
-            for (size_t i = 0; i + 0x28 <= (size_t)got; i += 8)
-            {
-                if (*reinterpret_cast<uint64_t*>(&buf[i]) != vt) continue;
-                vtOnly++;
-                if (*reinterpret_cast<uint64_t*>(&buf[i + 0x20]) != fn) continue;
-                found = reinterpret_cast<void*>(*reinterpret_cast<uint64_t*>(&buf[i + 0x18]));
-                break;
-            }
-        }
-    }
-    fclose(maps);
-    Log("pak mount: scanned %zu regions, %zu MB, %zu vtable hits", regions, scanned >> 20, vtOnly);
-    return found;
+    if (g_pakTried) return g_pakReady;
+    g_pakTried = true;
+    std::string rep;
+    if (!Resolver_ResolvePak(base, g_pak, rep)) { KLog(KLOG_WARN, "core", "pak mounting unavailable (unsupported game build?): %s", rep.c_str()); return false; }
+    Log("pak layer: %s", rep.c_str());
+    void* ptramp = nullptr;
+    if (InstallInlineHook(reinterpret_cast<void*>(g_pak.worker), reinterpret_cast<void*>(&HookedPakMount), &ptramp)) g_origPakMount = reinterpret_cast<PakMountFn>(ptramp);
+    else KLog(KLOG_WARN, "core", "pak mount hook failed: paks will be mounted with the engine's default (lowest) priority");
+    g_pakReady = true;
+    return true;
 }
 
 // Game thread. Mounts a pak file through the engine (the order is raised by HookedPakMount for kmod/paks).
 bool KMod_MountPak(const std::string& path)
 {
     uintptr_t base = InSDKUtils::GetImageBase();
-    if (!base || !g_origPakMount) return false;
-    if (!g_pakFile) { g_pakFile = FindPakFile(base); Log("pak mount: PakPlatformFile object %p", g_pakFile); }
-    if (!g_pakFile) return false;
+    if (!base || !EnsurePak(base) || !g_pak.pakFile) return false;
     std::u16string w;
     for (unsigned char c : path) w.push_back(c);          // paths are ASCII in practice; UTF-8 bytes are widened one by one
     struct { const char16_t* data; int32_t num; int32_t max; } fs = {w.c_str(), (int32_t)w.size() + 1, (int32_t)w.size() + 1};
     using Fn = uint64_t (*)(void*, void*, int32_t);
-    uint64_t r = reinterpret_cast<Fn>(base + kPakMountDelegateFn)(g_pakFile, &fs, -1);
+    uint64_t r = reinterpret_cast<Fn>(g_pak.mountFn)(g_pak.pakFile, &fs, -1);
     Log("pak mount: %s -> %d", path.c_str(), (int)(r & 0xff));
     return (r & 0xff) != 0;
+}
+
+// kmod/paks/*.pak: mounted from here, at "engine ready", so the paks are in place before the game loads most of its content.
+static std::vector<std::pair<std::string, std::string>> g_pakStatus;        // game thread only
+
+static std::vector<std::string> ListPakFiles()
+{
+    std::vector<std::string> names;
+    if (DIR* d = opendir((KModRoot() + "/paks").c_str()))
+    {
+        while (dirent* e = readdir(d))
+        {
+            std::string n = e->d_name;
+            if (n.size() > 4 && strcasecmp(n.c_str() + n.size() - 4, ".pak") == 0) names.push_back(n);
+        }
+        closedir(d);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+static std::string* PakStatusRef(const std::string& name)
+{
+    for (auto& p : g_pakStatus) if (p.first == name) return &p.second;
+    g_pakStatus.emplace_back(name, "");
+    return &g_pakStatus.back().second;
+}
+
+void KMod_MountPendingPaks()
+{
+    for (const std::string& name : ListPakFiles())
+    {
+        std::string* st = PakStatusRef(name);
+        if (*st == "mounted" || *st == "failed") continue;                       // handled once per game run
+        if (KBoot_SafeMode()) { *st = "skipped (safe mode)"; continue; }
+        if (KBoot_IsQuarantined("pak", name)) { *st = "skipped (it crashed the game)"; KLog(KLOG_WARN, "core", "pak %s crashed the game last time: not mounted", name.c_str()); continue; }
+        if (KBoot_IsQuarantined("off", name)) { *st = "switched off"; continue; }
+        KBoot_SetActivity("pak", name.c_str(), "");                              // a crash while mounting is blamed on the pak
+        bool ok = KMod_MountPak(KModRoot() + "/paks/" + name);
+        KBoot_SetActivity(nullptr, nullptr, nullptr);
+        *st = ok ? "mounted" : "failed";
+        if (ok) Log("mounted pak %s", name.c_str()); else KLog(KLOG_WARN, "core", "could not mount pak %s", name.c_str());
+    }
+}
+
+std::vector<std::pair<std::string, std::string>> KMod_PakStatus()
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const std::string& name : ListPakFiles())
+    {
+        std::string st = *PakStatusRef(name);
+        if (st.empty()) st = KBoot_IsQuarantined("off", name) ? "switched off" : "not mounted yet";
+        out.emplace_back(name, st);
+    }
+    return out;
 }
 
 static double g_readySince = 0;
@@ -246,8 +273,10 @@ static void OnGameTick()
     if (!UWorld::GetWorld()) return;
 
     double now = NowSec();
-    if (g_readySince == 0) { g_readySince = now; Log("engine ready"); }
+    if (g_readySince == 0) { g_readySince = now; Log("engine ready"); KMod_MountPendingPaks(); }
     if (now - g_readySince < 5.0) return; // let the game settle
+    static bool stableMarked = false;
+    if (!stableMarked && now - g_readySince > 60.0) { stableMarked = true; KBoot_MarkStable(); }
 
     LuaHost_Init();          // no-op after the first call
     LuaHost_Tick(now);
@@ -259,18 +288,26 @@ static void OnGameTick()
 static void InitThread()
 {
     Log("core init thread started");
-    for (int i = 0; i < 600; i++) // up to 5 minutes
+    uintptr_t base = 0;
+    std::string report;
+    bool ok = false;
+    for (int i = 0; i < 600 && !ok; i++)      // up to 5 minutes
     {
-        uintptr_t base = InSDKUtils::GetImageBase();
-        if (base)
+        base = InSDKUtils::GetImageBase();
+        if (base && Resolver_ResolveCore(base, report))
         {
             TUObjectArray* objs = InSDKUtils::GetGObjects();
-            if (objs && objs->Num() > 50000) { break; }
+            ok = objs && objs->Num() > 50000;
         }
-        usleep(500 * 1000);
+        if (!ok) usleep(500 * 1000);
     }
-    uintptr_t base = InSDKUtils::GetImageBase();
     if (!base) { KLog(KLOG_ERROR, "core", "libUnreal.so not found"); return; }
+    if (!ok)
+    {
+        KLog(KLOG_ERROR, "core", "this game build is not supported (could not locate the engine data): %s. kmod stays inactive.", report.c_str());
+        return;
+    }
+    Log("resolved: %s", report.c_str());
     sleep(3);
 
     void* target = reinterpret_cast<void*>(base + Offsets::ProcessEvent);
@@ -279,22 +316,13 @@ static void InitThread()
     if (!InstallInlineHook(target, reinterpret_cast<void*>(&HookedProcessEvent), &tramp)) { KLog(KLOG_ERROR, "core", "hook install FAILED"); return; }
     g_origPE = reinterpret_cast<ProcessEventFn>(tramp);
     Log("ProcessEvent hook installed, trampoline=%p", tramp);
-    {
-        uint32_t* mt = reinterpret_cast<uint32_t*>(base + kPakMountVA);
-        if (mt[0] != 0xA9BA7BFD)      // stp x29, x30, [sp, #-0x60]!
-            Log("pak mount: unexpected code at the mount function (other game build?): kmod/paks will not get priority");
-        else
-        {
-            void* ptramp = nullptr;
-            if (InstallInlineHook(mt, reinterpret_cast<void*>(&HookedPakMount), &ptramp)) { g_origPakMount = reinterpret_cast<PakMountFn>(ptramp); Log("pak mount hook installed"); }
-        }
-    }
     KLogInstallCrashHandlers();      // the engine installs its own handlers during start-up; (re)install ours on top of them
 }
 
 __attribute__((constructor)) static void CoreMain()
 {
     KLogInit();
+    KBoot_Init();
     Log("libkmodcore loaded");
     std::thread(InitThread).detach();
 }

@@ -147,16 +147,86 @@ builtin("mods", function()
   return table.concat(lines, "\n")
 end, "list installed mods and their status")
 
-builtin("paks", function()
-  local lines = {}
-  for _, e in ipairs(kmod.listdir(kmod.paths.root .. "/paks")) do
-    if not e.dir and e.name:lower():match("%.pak$") then
-      lines[#lines + 1] = string.format("  %-40s %s", e.name, (kmod.mounted_paks and kmod.mounted_paks[e.name]) or "not mounted")
-    end
+builtin("selftest", function()
+  local lines, bad = {}, 0
+  local function check(name, ok, detail)
+    if not ok then bad = bad + 1 end
+    lines[#lines + 1] = string.format("  [%s] %s%s", ok and "ok" or "FAIL", name, detail and (" - " .. tostring(detail)) or "")
   end
-  if #lines == 0 then return "no .pak files in kmod/paks" end
+  check("kmod version", kmod.version ~= nil, kmod.version)
+  check("game version", kmod.game ~= nil, kmod.game_version)
+  local pc = FindFirstOf("PlayerController")
+  check("find PlayerController", pc ~= nil and pc:IsValid())
+  local lib = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+  check("find default object", lib ~= nil and lib:IsValid())
+  local ok, name = pcall(function() return lib:GetGameName() end)
+  check("call a UFunction (GetGameName)", ok and type(name) == "string" and name ~= "", ok and name or tostring(name))
+  local j = kmod.json.decode(kmod.json.encode({ a = 1, b = { true, "x" } }))
+  check("json round trip", j and j.a == 1 and j.b[2] == "x")
+  check("object handle stays valid", pc ~= nil and pc:IsValid() and pc:GetFullName() ~= "")
+  local b = kmod.refresh_boot()
+  check("safe mode off", not b.safe)
+  local st = kmod.pak_status()
+  local bad_paks = {}
+  for _, p in ipairs(st) do if p.status == "failed" then bad_paks[#bad_paks + 1] = p.name end end
+  check("paks", #bad_paks == 0, #st .. " file(s)" .. (#bad_paks > 0 and (", failed: " .. table.concat(bad_paks, ", ")) or ""))
+  local done
+  local ok2, w = pcall(function()
+    local path = kmod.paths.root .. "/boot/selftest_worker.lua"
+    local f = io.open(path, "wb"); f:write("onMessage(function(m) post({sum = m.a + m.b, j = json.encode({m.a})}) end)"); f:close()
+    local wk = kmod.worker("selftest", path)
+    wk:onMessage(function(m) done = m; wk:close() end)
+    wk:post({ a = 20, b = 22 })
+    return wk
+  end)
+  check("worker started", ok2, ok2 and "reply arrives within a second" or tostring(w))
+  if ok2 then
+    ExecuteWithDelay(1500, function()
+      local good = done and done.sum == 42 and done.j == "[20]"
+      print("[selftest] worker round trip: " .. (good and "ok" or "FAIL"))
+    end)
+  end
+  return table.concat(lines, "\n") .. "\n" .. (bad == 0 and "all checks passed" or (bad .. " check(s) failed"))
+end, "run quick health checks of the loader (objects, calls, json, paks, worker)")
+
+builtin("safe", function(args)
+  local b = kmod.refresh_boot()
+  if args[1] == "off" then
+    kmod.safe_off()
+    kmod.refresh_boot()
+    kmod.mount_paks()
+    kmod.reload_mods()
+    return "safe mode is off; mods reloaded"
+  end
+  local mods, paks = {}, {}
+  for id in pairs(b.mods) do mods[#mods + 1] = id end
+  for n in pairs(b.paks) do paks[#paks + 1] = n end
+  table.sort(mods); table.sort(paks)
+  return string.format("safe mode: %s\ncrashes in a row with no known cause: %d\nlast crash while running: %s\nquarantined mods: %s\nquarantined paks: %s",
+    b.safe and "ON (mods and paks are not loaded)" or "off", b.crashes, b.last_crash ~= "" and b.last_crash or "-",
+    #mods > 0 and table.concat(mods, ", ") or "-", #paks > 0 and table.concat(paks, ", ") or "-")
+end, "show crash recovery state; 'safe off' leaves safe mode", "safe [off]")
+
+builtin("unquarantine", function(args)
+  if (args[1] ~= "mod" and args[1] ~= "pak") or not args[2] then return "usage: unquarantine <mod|pak> <name>" end
+  kmod.unquarantine(args[1], args[2])
+  kmod.refresh_boot()
+  if args[1] == "mod" then kmod.reload_mods() else kmod.mount_paks() end
+  return args[1] .. " " .. args[2] .. " can load again"
+end, "allow a mod or pak that crashed the game to load again", "unquarantine <mod|pak> <name>")
+
+builtin("paks", function(args)
+  if args[1] == "off" or args[1] == "on" then
+    if not args[2] then return "usage: paks " .. args[1] .. " <file name>" end
+    kmod.pak_off(args[2], args[1] == "off")
+    return args[2] .. (args[1] == "off" and " is switched off from the next start on (an already mounted pak stays until then)" or " will be mounted again at the next start")
+  end
+  local list = kmod.pak_status()
+  if #list == 0 then return "no .pak files in kmod/paks" end
+  local lines = {}
+  for _, p in ipairs(list) do lines[#lines + 1] = string.format("  %-40s %s", p.name, p.status) end
   return table.concat(lines, "\n")
-end, "list the pak files in kmod/paks and whether they were mounted")
+end, "list the pak files in kmod/paks with their status; 'paks off <file>' / 'paks on <file>' switch one off or on", "paks [off|on <file>]")
 
 local function setEnabled(id, on)
   local rec = id and findMod(id)
@@ -434,6 +504,7 @@ local API_STUB = [==[
 ---@field name string
 ---@field version string
 ---@field dir string
+---@field data_dir string
 ---@field path fun(rel: string): string
 ---@type ModInfo
 Mod = {}
@@ -564,6 +635,28 @@ function KWorker:close() end
 ---@param file string script path relative to the mod folder
 ---@return KWorker
 function Worker(file) end
+
+---@class KEvents
+Events = {}
+---@param name string
+---@param fn fun(...)
+---@return table handle
+function Events.on(name, fn) end
+---@param handle table
+function Events.off(handle) end
+---@param name string
+---@return integer handlers_called
+function Events.emit(name, ...) end
+
+---@class KStore
+Store = {}
+---@param key string
+---@param default any
+---@return any
+function Store.get(key, default) end
+---@param key string
+---@param value any
+function Store.set(key, value) end
 ]==]
 
 local LUARC = [==[

@@ -25,6 +25,7 @@
 ---@field name string
 ---@field version string
 ---@field dir string
+---@field data_dir string
 ---@field path fun(rel: string): string
 ---@type ModInfo
 Mod = {}
@@ -155,3 +156,25 @@ function KWorker:close() end
 ---@param file string script path relative to the mod folder
 ---@return KWorker
 function Worker(file) end
+
+---@class KEvents
+Events = {}
+---@param name string
+---@param fn fun(...)
+---@return table handle
+function Events.on(name, fn) end
+---@param handle table
+function Events.off(handle) end
+---@param name string
+---@return integer handlers_called
+function Events.emit(name, ...) end
+
+---@class KStore
+Store = {}
+---@param key string
+---@param default any
+---@return any
+function Store.get(key, default) end
+---@param key string
+---@param value any
+function Store.set(key, value) end

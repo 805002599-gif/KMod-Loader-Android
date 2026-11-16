@@ -40,7 +40,7 @@ foreach(NAME modloader modmanager commands json)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/lua/${NAME}.lua)
 endforeach()
 
-add_library(kmodcore SHARED src/core.cpp src/lua_host.cpp src/lua_worker.cpp src/kmod_log.cpp $<TARGET_OBJECTS:kmodsdk> $<TARGET_OBJECTS:kmodlua>)
+add_library(kmodcore SHARED src/core.cpp src/lua_host.cpp src/lua_worker.cpp src/resolver.cpp src/kmod_boot.cpp src/kmod_log.cpp $<TARGET_OBJECTS:kmodsdk> $<TARGET_OBJECTS:kmodlua>)
 target_include_directories(kmodcore PRIVATE ${KMOD_SDK_DIR} ${KMOD_SDK_DIR}/SDK ${KMOD_LUA_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/gen)
 if(KMOD_DEV)
   target_compile_definitions(kmodcore PRIVATE KMOD_DEV=1)

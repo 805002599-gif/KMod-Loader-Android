@@ -26,7 +26,12 @@ nav_order: 8
 - `Worker`：独立线程、独立 Lua 状态，消息通信（见 [Worker]({% link lua-api/global-functions/worker.md %})）；`ExecuteAsync`（别名）。
 - `FastLoop`，`NotifyOnNewObject` 的快速模式；新对象检测改为比较槽位序号，不再漏掉被复用的槽位。
 - `kmod/paks/` 里的 pak 启动后自动挂载，优先级高于游戏自带 pak（见 [Pak 模组]({% link guide/pak-mods.md %})）。
-- 控制台指令 `paks`。
+- 控制台指令 `paks`（可开关单个 pak）、`safe`、`unquarantine`、`selftest`。
+- **版本抗性**：`GObjects`、`GNames`、`ProcessEvent`、pak 挂载函数改为运行时验证和查找，写死的偏移失效时自动重新定位，找不到时安静地不活动（见[版本支持]({% link concepts/version-support.md %})）。
+- **崩溃保护**：记录崩溃时正在运行的模组或 pak，下次启动隔离它；原因不明的连续崩溃进入安全模式（见[崩溃保护]({% link guide/safe-mode.md %})）。
+- pak 由核心在引擎就绪时挂载，比之前早约 5 秒。
+- `Events`（模组间事件总线）、`Store`（模组的持久化存储）、`Mod.data_dir`。
+- UObject 句柄现在也比较槽位序号，对象被销毁、槽位被复用后旧句柄不会指向新对象。
 
 **Lua API**
 - 查找：`FindFirstOf`、`FindAllOf`、`FindObject`、`StaticFindObject`、`CreateInvalidObject`。

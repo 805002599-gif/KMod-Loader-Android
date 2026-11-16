@@ -54,6 +54,7 @@ function kmod.set_enabled(id, on)
   if on then
     if kmod.auto_disabled then kmod.auto_disabled[id] = nil end    -- re-enabling restarts the error count
     if kmod._errCount then kmod._errCount[id] = nil end
+    if kmod.unquarantine then kmod.unquarantine("mod", id) end     -- the user decided to try it again after a crash
   end
   saveState()
 end
@@ -447,7 +448,42 @@ local function loadOne(rec)
     assert(type(file) == "string" and not file:find("..", 1, true) and not file:find("^[/\\]"), "Worker: the script must be a relative path inside the mod")
     return kmod.worker(rec.id, rec.dir .. "/" .. file)
   end
-  env.Mod = { id = rec.id, name = rec.name, version = rec.version, dir = rec.dir, path = function(rel) return rec.dir .. "/" .. rel end }
+  -- Events: a bus shared by all mods (cleared when mods reload). Events.on(name, fn) -> handle; Events.emit(name, ...); Events.off(handle)
+  kmod._events = kmod._events or {}
+  env.Events = {
+    on = function(name, fn)
+      assert(type(name) == "string" and type(fn) == "function", "Events.on(name, fn)")
+      local list = kmod._events[name] or {}
+      kmod._events[name] = list
+      local h = { name = name, fn = fn, owner = rec.id }
+      list[#list + 1] = h
+      return h
+    end,
+    off = function(h)
+      local list = type(h) == "table" and kmod._events[h.name]
+      if list then for i, x in ipairs(list) do if x == h then table.remove(list, i); break end end end
+    end,
+    emit = function(name, ...)
+      local list = kmod._events[name]
+      if not list then return 0 end
+      local copy, n = { table.unpack(list) }, 0
+      for _, h in ipairs(copy) do
+        local ok, err = pcall(h.fn, ...)
+        n = n + 1
+        if not ok then loge(h.owner .. ": Events handler '" .. name .. "' failed: " .. tostring(err)); if kmod._mod_error then kmod._mod_error(h.owner, tostring(err)) end end
+      end
+      return n
+    end,
+  }
+  -- Store: small persistent key/value storage in kmod/data/<id>/store.json (values: anything json can hold)
+  local storePath = P.data .. "/" .. rec.id .. "/store.json"
+  local store
+  local function loadStore() if not store then store = json.decode(readFile(storePath) or "{}") or {}; end return store end
+  env.Store = {
+    get = function(key, default) local v = loadStore()[key]; if v == nil then return default end return v end,
+    set = function(key, value) loadStore()[key] = value; mkdirs(P.data .. "/" .. rec.id); writeFile(storePath, json.encode(store)) end,
+  }
+  env.Mod = { data_dir = P.data .. "/" .. rec.id, id = rec.id, name = rec.name, version = rec.version, dir = rec.dir, path = function(rel) return rec.dir .. "/" .. rel end }
   env.Settings = {
     get = function(id) return kmod.settings_get(rec, id) end,
     set = function(id, v) kmod.settings_set(rec, id, v) end,
@@ -465,18 +501,27 @@ local function loadOne(rec)
   env.require = makeRequire(rec, env)
   local chunk, err = loadfile(rec.entry, "t", env)
   if not chunk then rec.status = "load error: " .. tostring(err); kmod._status[rec.id] = rec.status; loge(rec.id .. ": " .. rec.status); return end
+  kmod.set_activity("mod", rec.id, "load")        -- a crash while the mod's main.lua runs is blamed on it
   local ok, e = xpcall(chunk, debug.traceback)
+  kmod.set_activity()
   if ok then rec.status = "loaded" else rec.status = "error: " .. tostring(e):match("^[^\n]*") ; loge(rec.id .. " main.lua failed: " .. tostring(e)) end
   kmod._status[rec.id] = rec.status
   if ok then log("loaded " .. rec.id .. " v" .. rec.version) end
 end
 
+-- crash recovery state (see kmod_boot.h): safe mode, mods/paks blamed for a crash
+kmod.boot = kmod.boot_info()
+function kmod.refresh_boot() kmod.boot = kmod.boot_info(); return kmod.boot end
+
 function kmod.load_mods()
+  kmod.refresh_boot()
+  if kmod.boot.safe then logw("SAFE MODE: no mods are loaded; use the 'safe off' console command or the Mods page to leave it") end
   loadState()
   mkdirs(P.data); mkdirs(P.inbox)
   migrate()
   kmod.install_inbox()
   kmod._status = {}
+  kmod._events = {}
   if kmod.console_clear_mods then kmod.console_clear_mods() end     -- mod commands are re-registered by the mods that load below
   if not kmod.game then
     if kmod.detect_game_version() then log("game version " .. tostring(kmod.game_version) .. " (kards " .. kmod.game .. ")")
@@ -515,7 +560,12 @@ function kmod.load_mods()
     for _, w in ipairs(rec.warnings) do logw(rec.id .. ": " .. w) end
     for _, e in ipairs(rec.errors) do logw(rec.id .. ": " .. e) end
     if rec.enabled and #rec.errors == 0 then
-      if not visit(rec) and rec.status then logw(rec.id .. ": " .. rec.status) end
+      if kmod.boot.safe then
+        rec.status = "not loaded: safe mode"; kmod._status[rec.id] = rec.status
+      elseif kmod.boot.mods[rec.id] then
+        rec.status = "not loaded: it crashed the game (enable it again to retry)"; kmod._status[rec.id] = rec.status
+        logw(rec.id .. ": " .. rec.status)
+      elseif not visit(rec) and rec.status then logw(rec.id .. ": " .. rec.status) end
     end
   end
   for _, rec in ipairs(order) do loadOne(rec) end
@@ -562,30 +612,7 @@ if not kmod._lang_watch then                              -- poll the game langu
 end
 
 -- ------------------------------------------------------------------ pak mods
--- Every *.pak in kmod/paks is mounted through the engine (core.cpp finds the pak layer and raises the pak order of
--- these paks above the game's, see core.cpp). Mounted once per game run: reloading mods does not mount again.
-kmod.mounted_paks = kmod.mounted_paks or {}
-
-function kmod.mount_paks()
-  local list = {}
-  for _, e in ipairs(kmod.listdir(P.root .. "/paks")) do
-    if not e.dir and e.name:lower():match("%.pak$") then list[#list + 1] = e.name end
-  end
-  table.sort(list)
-  for _, name in ipairs(list) do
-    if not kmod.mounted_paks[name] then
-      local ok = kmod.mount_pak(P.root .. "/paks/" .. name)
-      kmod.mounted_paks[name] = ok and "mounted" or "failed"
-      if ok then log("mounted pak " .. name) else logw("could not mount pak " .. name) end
-    end
-  end
-  return true
-end
-
-if not kmod._pak_watch then
-  kmod._pak_watch = true
-  LoopAsync(500, function()
-    kmod.mount_paks()
-    return true
-  end)
-end
+-- Every *.pak in kmod/paks is mounted by the core (core.cpp) as soon as the engine is ready, with a pak order above the
+-- game's own paks. Crashes while mounting quarantine the pak; kmod.pak_off(name, true) switches one off for the next start.
+-- kmod.mount_paks() mounts paks that were dropped in later or skipped by safe mode.
+function kmod.mount_paks() kmod.mount_pending_paks() end

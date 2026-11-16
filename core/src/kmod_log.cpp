@@ -1,4 +1,5 @@
 #include "kmod_log.h"
+#include "kmod_boot.h"
 
 #include <android/log.h>
 #include <dirent.h>
@@ -197,6 +198,7 @@ _Unwind_Reason_Code UnwindCb(struct _Unwind_Context* ctx, void* arg)
 
 void CrashHandler(int sig, siginfo_t* info, void* ctx)
 {
+    KBoot_OnCrash();            // remember what the game thread was running (blamed on the next start)
     if (g_crashFd >= 0)
     {
         char line[400]; size_t n = 0;

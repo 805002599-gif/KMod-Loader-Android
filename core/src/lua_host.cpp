@@ -33,6 +33,7 @@ extern "C" {
 #include "commands_lua.h"       // generated from lua/commands.lua (kCommandsLua)
 #include "json_lua.h"           // generated from lua/json.lua (kJsonLua)
 #include "lua_worker.h"
+#include "kmod_boot.h"
 
 using namespace SDK;
 
@@ -210,13 +211,17 @@ lua_State* L_ = nullptr;
 constexpr const char* MT_OBJECT = "kmod.UObject";
 constexpr const char* MT_PARAMS = "kmod.Params";
 
-struct LuaObj { UObject* p; int32_t idx; };
+// FUObjectItem::SerialNumber changes whenever a slot is reused: (pointer, index, serial) identifies one object for its whole life
+inline int32_t SlotSerial(FUObjectItem* it) { return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 0x10); }
+struct LuaObj { UObject* p; int32_t idx; int32_t serial; };
 struct LuaParams { UFunction* fn; uint8_t* parms; };
 
 void PushObject(lua_State* L, UObject* o)
 {
     LuaObj* u = static_cast<LuaObj*>(lua_newuserdatauv(L, sizeof(LuaObj), 0));
     u->p = o; u->idx = o ? o->Index : -1;
+    FUObjectItem* it = o ? ObjRef::ItemAt(o->Index) : nullptr;
+    u->serial = it ? SlotSerial(it) : 0;
     luaL_setmetatable(L, MT_OBJECT);
 }
 
@@ -224,7 +229,7 @@ bool ObjAlive(const LuaObj* o)
 {
     if (!o || !o->p || o->idx < 0) return false;
     FUObjectItem* it = ObjRef::ItemAt(o->idx);
-    return it && it->Object == o->p && ObjRef::ItemUsable(it);
+    return it && it->Object == o->p && SlotSerial(it) == o->serial && ObjRef::ItemUsable(it);
 }
 
 LuaObj* ToLuaObj(lua_State* L, int i) { return static_cast<LuaObj*>(luaL_testudata(L, i, MT_OBJECT)); }
@@ -1056,7 +1061,6 @@ std::vector<NewObjWatch> g_newObjWatches;
 int32_t g_lastObjCount = 0;
 struct SlotSeen { UObject* p = nullptr; int32_t serial = 0; };
 std::vector<SlotSeen> g_slotSeen;
-inline int32_t SlotSerial(FUObjectItem* it) { return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 0x10); }   // FUObjectItem::SerialNumber
 
 // Per-mod wrappers carry the mod name as upvalue 1 so a mod's hooks/timers can be dropped when it is disabled.
 std::string Owner(lua_State* L)
@@ -1176,10 +1180,14 @@ void ReportModError(lua_State* L, const std::string& owner, const std::string& m
 bool PCall(lua_State* L, int nargs, int nres, const char* what, const std::string& owner = std::string())
 {
     int base = lua_gettop(L) - nargs;
+    char savedActivity[112];
+    KBoot_GetActivity(savedActivity, sizeof(savedActivity));
+    if (!owner.empty()) KBoot_SetActivity("mod", owner.c_str(), what);      // a crash inside this call is blamed on the mod
     lua_pushcfunction(L, TraceHandler);
     lua_insert(L, base);
     int rc = lua_pcall(L, nargs, nres, base);
     lua_remove(L, base);
+    KBoot_RestoreActivity(savedActivity);
     if (rc != LUA_OK)
     {
         std::string msg = lua_tostring(L, -1) ? lua_tostring(L, -1) : "?";
@@ -1440,6 +1448,50 @@ int Ccb_Rmtree(lua_State* L)   // only inside <root>/
     return 0;
 }
 
+// kmod.boot_info() -> { safe=bool, crashes=n, last_crash=str, mods={id=true}, paks={name=true} }   (see kmod_boot.h)
+int Boot_Info(lua_State* L)
+{
+    lua_newtable(L);
+    lua_pushboolean(L, KBoot_SafeMode()); lua_setfield(L, -2, "safe");
+    lua_pushinteger(L, KBoot_CrashCount()); lua_setfield(L, -2, "crashes");
+    lua_pushstring(L, KBoot_LastCrash().c_str()); lua_setfield(L, -2, "last_crash");
+    for (const char* kind : {"mod", "pak"})
+    {
+        lua_newtable(L);
+        for (auto& n : KBoot_QuarantineList(kind)) { lua_pushboolean(L, 1); lua_setfield(L, -2, n.c_str()); }
+        lua_setfield(L, -2, std::string(kind) == "mod" ? "mods" : "paks");
+    }
+    return 1;
+}
+int Pak_Status(lua_State* L)       // kmod.pak_status() -> { {name=, status=}, ... }
+{
+    lua_newtable(L);
+    int i = 0;
+    for (auto& p : KMod_PakStatus())
+    {
+        lua_newtable(L);
+        lua_pushstring(L, p.first.c_str()); lua_setfield(L, -2, "name");
+        lua_pushstring(L, p.second.c_str()); lua_setfield(L, -2, "status");
+        lua_rawseti(L, -2, ++i);
+    }
+    return 1;
+}
+int Pak_MountPending(lua_State*) { KMod_MountPendingPaks(); return 0; }
+int Pak_Off(lua_State* L)         // kmod.pak_off(name, off): switch a pak off (it is not mounted from the next start on) or back on
+{
+    std::string name = luaL_checkstring(L, 1);
+    if (lua_toboolean(L, 2)) KBoot_Add("off", name); else KBoot_Unquarantine("off", name);
+    return 0;
+}
+int Boot_SafeOff(lua_State*) { KBoot_SafeOff(); return 0; }
+int Boot_Unquarantine(lua_State* L) { KBoot_Unquarantine(luaL_checkstring(L, 1), luaL_checkstring(L, 2)); return 0; }
+int Boot_SetActivity(lua_State* L)      // kmod.set_activity("mod", id, what) / kmod.set_activity() to clear
+{
+    if (lua_isnoneornil(L, 1)) KBoot_SetActivity(nullptr, nullptr, nullptr);
+    else KBoot_SetActivity(luaL_checkstring(L, 1), luaL_optstring(L, 2, ""), luaL_optstring(L, 3, ""));
+    return 0;
+}
+
 int Ccb_ModApi(lua_State* L)   // kmod.mod_api(modId) -> owner-tagged RegisterHook / ExecuteWithDelay / ... for that mod's environment
 {
     const char* name = luaL_checkstring(L, 1);
@@ -1618,6 +1670,13 @@ void LuaHost_Init()
     }
     lua_getglobal(L, "kmod");
     lua_pushcfunction(L, Worker_Create); lua_setfield(L, -2, "worker");
+    lua_pushcfunction(L, Boot_Info); lua_setfield(L, -2, "boot_info");
+    lua_pushcfunction(L, Boot_SafeOff); lua_setfield(L, -2, "safe_off");
+    lua_pushcfunction(L, Pak_Status); lua_setfield(L, -2, "pak_status");
+    lua_pushcfunction(L, Pak_MountPending); lua_setfield(L, -2, "mount_pending_paks");
+    lua_pushcfunction(L, Pak_Off); lua_setfield(L, -2, "pak_off");
+    lua_pushcfunction(L, Boot_Unquarantine); lua_setfield(L, -2, "unquarantine");
+    lua_pushcfunction(L, Boot_SetActivity); lua_setfield(L, -2, "set_activity");
     lua_pushcfunction(L, [](lua_State* S) -> int { lua_pushboolean(S, KMod_MountPak(luaL_checkstring(S, 1))); return 1; });
     lua_setfield(L, -2, "mount_pak");
     lua_pushcfunction(L, Ccb_ListDir); lua_setfield(L, -2, "listdir");
