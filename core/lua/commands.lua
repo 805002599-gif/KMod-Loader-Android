@@ -534,7 +534,6 @@ function NotifyOnNewObject(className, fn) end
 
 local LUARC = [==[
 {
-  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
   "runtime": { "version": "Lua 5.4" },
   "workspace": { "library": [ "./types" ], "checkThirdParty": false },
   "diagnostics": { "globals": [ "Mod", "Log", "Settings", "Lang", "Console", "kmod" ] }
