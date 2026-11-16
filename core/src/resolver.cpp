@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -22,8 +23,10 @@ struct Seg { uintptr_t lo, hi; uint32_t flags; };
 std::vector<Seg> g_segs;
 uintptr_t g_modLo = 0, g_modHi = 0;
 
+std::mutex g_segMu;
 void LoadSegs()
 {
+    std::lock_guard<std::mutex> lock(g_segMu);
     if (!g_segs.empty()) return;
     dl_iterate_phdr(
         [](struct dl_phdr_info* info, size_t, void*) -> int
@@ -270,4 +273,22 @@ bool Resolver_ResolvePak(uintptr_t base, PakAddrs& out, std::string& report)
     snprintf(b, sizeof(b), "mount fn 0x%lx worker 0x%lx pak file %p", (unsigned long)(out.mountFn - base), (unsigned long)(out.worker - base), out.pakFile);
     report = b;
     return true;
+}
+
+void Resolver_FindBytes(const void* pat, size_t n, std::vector<uintptr_t>& hits)
+{
+    LoadSegs();
+    for (auto& s : g_segs)
+    {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(s.lo);
+        size_t left = s.hi - s.lo;
+        while (left >= n)
+        {
+            const uint8_t* hit = static_cast<const uint8_t*>(memmem(p, left, pat, n));
+            if (!hit) break;
+            hits.push_back(reinterpret_cast<uintptr_t>(hit));
+            size_t adv = (size_t)(hit - p) + 1;
+            p += adv; left -= adv;
+        }
+    }
 }

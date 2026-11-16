@@ -3,6 +3,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // GObjects, GNames, ProcessEvent (the SDK's writable Offsets::* are filled in) and GWorld (set to 0: the SDK asks the engine).
 // Safe to call repeatedly until it returns true. `report` describes what was used.
@@ -14,5 +15,8 @@ struct PakAddrs
     uintptr_t worker = 0;       // the mount worker; x1 = { const TCHAR* path; int32 order; ... }
     void* pakFile = nullptr;    // the FPakPlatformFile object (`this`)
 };
+// All addresses in the module's memory where `pat` occurs (any segment).
+void Resolver_FindBytes(const void* pat, size_t n, std::vector<uintptr_t>& hits);
+
 // Heap scan (about a second). Returns false when the pak layer could not be identified (other game build).
 bool Resolver_ResolvePak(uintptr_t base, PakAddrs& out, std::string& report);

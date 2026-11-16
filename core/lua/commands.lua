@@ -730,7 +730,86 @@ function Http.post(url, body, opts, cb) end
 function Http.request(opts, cb) end
 ---@param resp KHttpResponse
 ---@return any
+---@param url string
+---@param path string
+---@param opts? table|fun(resp: KHttpResponse)
+---@param cb? fun(resp: KHttpResponse)
+---@param progress? fun(bytes: number, total: number)
+---@return integer id
+function Http.download(url, path, opts, cb, progress) end
 function Http.json(resp) end
+
+---@class KConnection
+local KConnection = {}
+---@param data string
+---@return boolean queued
+function KConnection:send(data) end
+---@param data string
+---@return boolean queued
+function KConnection:send_binary(data) end
+function KConnection:close() end
+---@return boolean
+function KConnection:is_open() end
+
+---@class KWebSocketHandlers
+---@field headers? table<string,string>
+---@field timeout? integer
+---@field on_open? fun()
+---@field on_message? fun(data: string, is_binary: boolean)
+---@field on_close? fun(code: integer, reason: string)
+---@field on_error? fun(message: string)
+
+---@class KWebSocket
+WebSocket = {}
+---@param url string ws:// or wss://
+---@param handlers KWebSocketHandlers
+---@return KConnection
+function WebSocket.connect(url, handlers) end
+
+---@class KSocketHandlers
+---@field tls? boolean
+---@field timeout? integer
+---@field on_open? fun()
+---@field on_data? fun(data: string)
+---@field on_close? fun(code: integer, reason: string)
+---@field on_error? fun(message: string)
+
+---@class KSocket
+Socket = {}
+---@param host string
+---@param port integer
+---@param handlers KSocketHandlers
+---@return KConnection
+function Socket.tcp(host, port, handlers) end
+---@param host string
+---@param port integer
+---@param handlers KSocketHandlers
+---@return KConnection
+function Socket.udp(host, port, handlers) end
+
+---@class KGameMessage
+---@field channel string
+---@field sender string
+---@field message string
+---@field context string
+
+---@class KNet
+Net = {}
+---@param fn fun(msg: KGameMessage): table?
+function Net.on_message(fn) end
+---@param fn fun(state: "open"|"closed"|"failure", detail?: string)
+function Net.on_state(fn) end
+---@param channel string
+---@param receiver string
+---@param message string
+---@param context? string
+function Net.send(channel, receiver, message, context) end
+---@return boolean
+function Net.is_connected() end
+---@return string
+function Net.url() end
+---@return string
+function Net.redirect_status() end
 ]==]
 
 local LUARC = [==[

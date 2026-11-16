@@ -281,7 +281,7 @@ local function inspect(folder)
   rec.permissions = {}                                    -- declared in mod.json "permissions": ["network"]; shown to the user, see docs
   if def.permissions ~= nil and type(def.permissions) ~= "table" then rec.errors[#rec.errors + 1] = "permissions must be a list" end
   for _, p in ipairs(type(def.permissions) == "table" and def.permissions or {}) do
-    if p == "network" then rec.permissions[p] = true
+    if p == "network" or p == "game_network" then rec.permissions[p] = true
     else rec.warnings[#rec.warnings + 1] = "unknown permission '" .. tostring(p) .. "' ignored" end
   end
   rec.depends, rec.depCons = {}, {}                       -- depends = mod ids to load first; depCons[id] = version conditions
@@ -454,6 +454,8 @@ local function loadOne(rec)
     assert(type(file) == "string" and not file:find("..", 1, true) and not file:find("^[/\\]"), "Worker: the script must be a relative path inside the mod")
     return kmod.worker(rec.id, rec.dir .. "/" .. file)
   end
+  if kmod.net_sockets_api then env.WebSocket, env.Socket = kmod.net_sockets_api(rec) end
+  if kmod.net_api then env.Net = kmod.net_api(rec) end          -- the game's own WebSocket traffic (permission "game_network")
   if kmod.ui_api then env.UI = kmod.ui_api(rec) end            -- UI.window{...}, UI.toast(text)
   -- Http: needs "permissions": ["network"] in mod.json. Http.get(url [, opts], cb), Http.post(url, body [, opts], cb), Http.request(opts, cb), Http.json(resp)
   local function httpRequest(opts, cb)
@@ -482,6 +484,16 @@ local function loadOne(rec)
         if not o.headers["Content-Type"] then o.headers["Content-Type"] = "application/json" end
       else o.body = body end
       return httpRequest(o, cb)
+    end,
+    -- Http.download(url, path [, opts], cb [, progress]): streams the body into a file inside kmod/data, inbox, paks or art.
+    -- cb(resp) with resp.saved / resp.size on success; progress(bytes, total) about 6 times a second (total = -1 if unknown)
+    download = function(url, path, opts, cb, progress)
+      if type(opts) == "function" then progress, cb, opts = cb, opts, nil end
+      local o = withUrl(url, "GET", opts)
+      o.save_to = path
+      if not rec.permissions.network then error('Http: this mod must declare "permissions": ["network"] in mod.json', 2) end
+      if type(cb) ~= "function" then error("Http.download: expected a callback", 2) end
+      return kmod.http_request(rec.id, o, cb, progress)
     end,
     json = function(resp) return resp and resp.body and json.decode(resp.body) or nil end,
   }
@@ -559,6 +571,7 @@ function kmod.load_mods()
   kmod.install_inbox()
   kmod._status = {}
   kmod._events = {}
+  kmod._net_conns = {}
   if kmod.ui_close_all then kmod.ui_close_all() end        -- windows of the previous run
   if kmod.console_clear_mods then kmod.console_clear_mods() end     -- mod commands are re-registered by the mods that load below
   if not kmod.game then

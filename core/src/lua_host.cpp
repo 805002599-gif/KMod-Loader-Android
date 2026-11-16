@@ -32,9 +32,12 @@ extern "C" {
 #include "modmanager_lua.h"   // generated from lua/modmanager.lua (kModManagerLua)
 #include "commands_lua.h"       // generated from lua/commands.lua (kCommandsLua)
 #include "json_lua.h"           // generated from lua/json.lua (kJsonLua)
+#include "net_lua.h"            // generated from lua/net.lua (kNetLua)
 #include "ui_lua.h"             // generated from lua/ui.lua (kUiLua)
 #include "lua_worker.h"
 #include "http.h"
+#include "net_conn.h"
+#include "net_redirect.h"
 #include "kmod_boot.h"
 
 using namespace SDK;
@@ -679,6 +682,18 @@ int Params_Index(lua_State* L)
     return 1;
 }
 
+// A string the ENGINE allocated: the caller of a hooked function frees its FString parameters with the engine's allocator,
+// so a replacement must come from it too (Concat_StrStr(text, "") returns a fresh engine-owned copy; we take it over).
+FString EngineString(const std::string& utf8)
+{
+    std::u16string u = Utf8To16(utf8);
+    int32_t n = (int32_t)u.size() + 1;
+    FString in(reinterpret_cast<TCHAR*>(const_cast<char16_t*>(u.c_str())), n, n);
+    static const char16_t kEmpty[1] = { 0 };
+    FString empty(reinterpret_cast<TCHAR*>(const_cast<char16_t*>(kEmpty)), 1, 1);
+    return UKismetStringLibrary::Concat_StrStr(in, empty);
+}
+
 int Params_NewIndex(lua_State* L)
 {
     LuaParams* lp = static_cast<LuaParams*>(luaL_checkudata(L, 1, MT_PARAMS));
@@ -686,6 +701,12 @@ int Params_NewIndex(lua_State* L)
     for (FField* f = lp->fn->ChildProperties; f; f = f->Next)
         if (f->Name.ToString() == key)
         {
+            if (TypeOf(static_cast<FProperty*>(f)) == T_Str)            // strings: engine-allocated copy (see EngineString)
+            {
+                FString* dst = reinterpret_cast<FString*>(lp->parms + static_cast<FProperty*>(f)->Offset);
+                *dst = EngineString(luaL_checkstring(L, 3));
+                return 0;
+            }
             std::deque<std::u16string> keep; std::string err;
             if (!SetFromLua(L, 3, static_cast<FProperty*>(f), lp->parms + static_cast<FProperty*>(f)->Offset, false, keep, err)) return luaL_error(L, "%s", err.c_str());
             return 0;
@@ -1669,6 +1690,7 @@ void LuaHost_Init()
             [](lua_State* S, const std::string& owner, const std::string& msg) { ReportModError(S, owner, msg); }};
         Worker_Init(L, wh, kJsonLua);
         Http_Init(wh);
+        NetConn_Init(wh);
         if (luaL_loadbuffer(L, kJsonLua, strlen(kJsonLua), "=json") == LUA_OK && lua_pcall(L, 0, 1, 0) == LUA_OK)
         {
             lua_getglobal(L, "kmod");
@@ -1680,6 +1702,10 @@ void LuaHost_Init()
     lua_getglobal(L, "kmod");
     lua_pushcfunction(L, Worker_Create); lua_setfield(L, -2, "worker");
     lua_pushcfunction(L, Http_Request); lua_setfield(L, -2, "http_request");
+    lua_pushcfunction(L, NetConn_Open); lua_setfield(L, -2, "net_open");
+    lua_pushcfunction(L, NetConn_Send); lua_setfield(L, -2, "net_send");
+    lua_pushcfunction(L, NetConn_Close); lua_setfield(L, -2, "net_close");
+    lua_pushcfunction(L, [](lua_State* S) -> int { lua_pushstring(S, NetRedirect_Status().c_str()); return 1; }); lua_setfield(L, -2, "net_redirect_status");
     lua_pushcfunction(L, Boot_Info); lua_setfield(L, -2, "boot_info");
     lua_pushcfunction(L, Boot_SafeOff); lua_setfield(L, -2, "safe_off");
     lua_pushcfunction(L, Pak_Status); lua_setfield(L, -2, "pak_status");
@@ -1723,7 +1749,7 @@ void LuaHost_Init()
     // <dev>/modmanager.lua override the embedded copies.
     {
         struct { const char* file; const char* embedded; const char* chunk; } builtins[] = {
-            {"modloader.lua", kModLoaderLua, "=modloader"}, {"commands.lua", kCommandsLua, "=commands"}, {"ui.lua", kUiLua, "=ui"}, {"modmanager.lua", kModManagerLua, "=modmanager"}};
+            {"modloader.lua", kModLoaderLua, "=modloader"}, {"commands.lua", kCommandsLua, "=commands"}, {"ui.lua", kUiLua, "=ui"}, {"net.lua", kNetLua, "=net"}, {"modmanager.lua", kModManagerLua, "=modmanager"}};
         for (auto& b : builtins)
         {
             std::string code = b.embedded;
@@ -1754,6 +1780,7 @@ void LuaHost_ReloadMods()
     if (!L_) return;
     Worker_CloseUser(L_);
     Http_CancelUser(L_);
+    NetConn_CloseUser(L_);
     for (auto& kv : g_hooks)
     {
         auto& v = kv.second;
@@ -1853,6 +1880,7 @@ void LuaHost_Tick(double now)
 
     Worker_Pump(L_);
     Http_Pump(L_);
+    NetConn_Pump(L_);
 
     if (!g_anyFastWatch) ScanNewObjects();        // with a fast watch the scan runs from LuaHost_FastTick instead
 

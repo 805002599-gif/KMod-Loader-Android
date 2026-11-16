@@ -1,8 +1,11 @@
 #include "http.h"
 
 #include <dlfcn.h>
+#include <sys/stat.h>
 #include <jni.h>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -10,6 +13,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "kmod_common.h"
 
 extern "C" {
 #include "lua.h"
@@ -20,7 +25,7 @@ namespace
 {
 struct Options
 {
-    std::string method = "GET", url, body;
+    std::string method = "GET", url, body, saveTo;            // saveTo: stream the body into this file instead of memory
     std::vector<std::pair<std::string, std::string>> headers;
     int timeoutMs = 15000;
     size_t maxBytes = 8u << 20;
@@ -29,11 +34,13 @@ struct Options
 struct Response
 {
     int id = 0, status = 0;
-    std::string body, error;
+    bool progress = false;                                       // a progress report, not the final answer
+    long long bytes = 0, total = -1;
+    std::string body, error, saved;
     std::vector<std::pair<std::string, std::string>> headers;
 };
 
-struct Pending { std::string owner; int cbRef; };
+struct Pending { std::string owner; int cbRef; int progressRef; };
 
 WorkerHooks g_hooks{};
 std::mutex g_mu;
@@ -89,9 +96,12 @@ std::string TakeException(JNIEnv* env)
 
 #define JCHECK() do { if (env->ExceptionCheck()) { r.error = TakeException(env); goto done; } } while (0)
 
-Response Perform(JNIEnv* env, const Options& o)
+Response Perform(JNIEnv* env, const Options& o, int id)
 {
     Response r;
+    FILE* file = nullptr;
+    long long written = 0;
+    auto lastReport = std::chrono::steady_clock::now();
     jclass cURL = nullptr, cConn = nullptr, cIn = nullptr, cOut = nullptr;
     jobject url = nullptr, conn = nullptr, in = nullptr, os = nullptr;
     jbyteArray buf = nullptr;
@@ -168,18 +178,51 @@ Response Perform(JNIEnv* env, const Options& o)
     {
         jmethodID mRead = env->GetMethodID(cIn, "read", "([B)I");
         buf = env->NewByteArray(16384);
+        long long total = -1;
+        for (auto& h : r.headers) { std::string k = h.first; for (auto& ch : k) ch = (char)tolower((unsigned char)ch); if (k == "content-length") total = atoll(h.second.c_str()); }
+        if (!o.saveTo.empty() && status < 400)
+        {
+            for (size_t p = KModRoot().size() + 1; (p = o.saveTo.find('/', p)) != std::string::npos; p++)      // create the folders
+                mkdir(o.saveTo.substr(0, p).c_str(), 0777);
+            file = fopen((o.saveTo + ".part").c_str(), "wb");
+            if (!file) { r.error = "cannot write " + o.saveTo; goto done; }
+        }
         for (;;)
         {
             jint n = env->CallIntMethod(in, mRead, buf);
             JCHECK();
             if (n < 0) break;
+            if (file)
+            {
+                std::string tmp(n, '\0');
+                env->GetByteArrayRegion(buf, 0, n, reinterpret_cast<jbyte*>(&tmp[0]));
+                if (fwrite(tmp.data(), 1, n, file) != (size_t)n) { r.error = "writing the file failed"; break; }
+                written += n;
+                if (written > (long long)o.maxBytes) { r.error = "download larger than the limit"; break; }
+                auto now = std::chrono::steady_clock::now();
+                if (now - lastReport > std::chrono::milliseconds(150))
+                {
+                    lastReport = now;
+                    Response p; p.id = id; p.progress = true; p.bytes = written; p.total = total;
+                    std::lock_guard<std::mutex> g(g_mu);
+                    g_done.push_back(std::move(p));
+                }
+                continue;
+            }
             size_t old = r.body.size();
             r.body.resize(old + n);
             env->GetByteArrayRegion(buf, 0, n, reinterpret_cast<jbyte*>(&r.body[old]));
             if (r.body.size() > o.maxBytes) { r.body.resize(o.maxBytes); r.error = "response larger than the limit (truncated)"; break; }
         }
+        r.bytes = written; r.total = total;
     }
 done:
+    if (file)
+    {
+        fclose(file);
+        if (r.error.empty()) { if (rename((o.saveTo + ".part").c_str(), o.saveTo.c_str()) == 0) r.saved = o.saveTo; else r.error = "cannot move the downloaded file into place"; }
+        else remove((o.saveTo + ".part").c_str());
+    }
     if (env->ExceptionCheck()) env->ExceptionClear();
     if (conn)
     {
@@ -201,7 +244,7 @@ void Run(int id, Options o)
     if (!vm || vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) r.error = "no Java VM";
     else
     {
-        r = Perform(env, o);
+        r = Perform(env, o, id);
         vm->DetachCurrentThread();
     }
     r.id = id;
@@ -235,6 +278,18 @@ int Http_Request(lua_State* L)
     lua_pop(L, 1);
     lua_getfield(L, 2, "max_bytes"); if (lua_isnumber(L, -1)) { double m = lua_tonumber(L, -1); if (m > 0 && m < (32 << 20)) o.maxBytes = (size_t)m; }
     lua_pop(L, 1);
+    lua_getfield(L, 2, "save_to");
+    if (lua_isstring(L, -1))
+    {
+        o.saveTo = lua_tostring(L, -1);
+        bool ok = false;
+        for (const char* sub : {"/data/", "/inbox/", "/paks/", "/art/"})
+            if (o.saveTo.compare(0, (KModRoot() + sub).size(), KModRoot() + sub) == 0) ok = true;
+        if (!ok || o.saveTo.find("..") != std::string::npos)
+            return luaL_error(L, "Http: files can only be saved inside kmod/data, kmod/inbox, kmod/paks or kmod/art");
+        if (o.maxBytes == (8u << 20)) o.maxBytes = 512u << 20;        // downloads may be big unless the mod set its own limit
+    }
+    lua_pop(L, 1);
     lua_getfield(L, 2, "headers");
     if (lua_istable(L, -1))
     {
@@ -256,7 +311,10 @@ int Http_Request(lua_State* L)
 
     int id = g_nextId++;
     lua_pushvalue(L, 3);
-    g_pending[id] = Pending{owner, luaL_ref(L, LUA_REGISTRYINDEX)};
+    int cb = luaL_ref(L, LUA_REGISTRYINDEX);
+    int progressRef = LUA_NOREF;
+    if (lua_isfunction(L, 4)) { lua_pushvalue(L, 4); progressRef = luaL_ref(L, LUA_REGISTRYINDEX); }
+    g_pending[id] = Pending{owner, cb, progressRef};
     g_active++;
     std::thread(Run, id, std::move(o)).detach();
     lua_pushinteger(L, id);
@@ -275,8 +333,20 @@ void Http_Pump(lua_State* L)
     {
         auto it = g_pending.find(r.id);
         if (it == g_pending.end()) continue;                    // cancelled (mod reloaded)
+        if (r.progress)
+        {
+            if (it->second.progressRef != LUA_NOREF)
+            {
+                lua_rawgeti(L, LUA_REGISTRYINDEX, it->second.progressRef);
+                lua_pushnumber(L, (double)r.bytes);
+                lua_pushnumber(L, (double)r.total);
+                g_hooks.pcall(L, 2, 0, "http progress", it->second.owner);
+            }
+            continue;
+        }
         Pending p = it->second;
         g_pending.erase(it);
+        if (p.progressRef != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, p.progressRef);
         lua_rawgeti(L, LUA_REGISTRYINDEX, p.cbRef);
         luaL_unref(L, LUA_REGISTRYINDEX, p.cbRef);
         lua_newtable(L);
@@ -286,6 +356,7 @@ void Http_Pump(lua_State* L)
         for (auto& h : r.headers) { lua_pushstring(L, h.second.c_str()); lua_setfield(L, -2, h.first.c_str()); }
         lua_setfield(L, -2, "headers");
         if (!r.error.empty()) { lua_pushstring(L, r.error.c_str()); lua_setfield(L, -2, "error"); }
+        if (!r.saved.empty()) { lua_pushstring(L, r.saved.c_str()); lua_setfield(L, -2, "saved"); lua_pushnumber(L, (double)r.bytes); lua_setfield(L, -2, "size"); }
         g_hooks.pcall(L, 1, 0, "http callback", p.owner);
     }
 }
@@ -294,7 +365,12 @@ void Http_CancelUser(lua_State* L)
 {
     for (auto it = g_pending.begin(); it != g_pending.end();)
     {
-        if (!it->second.owner.empty()) { luaL_unref(L, LUA_REGISTRYINDEX, it->second.cbRef); it = g_pending.erase(it); }
+        if (!it->second.owner.empty())
+        {
+            luaL_unref(L, LUA_REGISTRYINDEX, it->second.cbRef);
+            if (it->second.progressRef != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, it->second.progressRef);
+            it = g_pending.erase(it);
+        }
         else ++it;
     }
 }

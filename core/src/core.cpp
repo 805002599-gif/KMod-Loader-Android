@@ -27,6 +27,7 @@
 #include "lua_host.h"
 #include "resolver.h"
 #include "kmod_boot.h"
+#include "net_redirect.h"
 #include "Basic.hpp"
 #include "CoreUObject_classes.hpp"
 #include "Engine_classes.hpp"
@@ -343,6 +344,7 @@ __attribute__((constructor)) static void CoreMain()
 {
     KLogInit();
     KBoot_Init();
+    NetRedirect_Start();          // before anything else: the game reads its server URLs early
     Log("libkmodcore loaded");
     std::thread(InitThread).detach();
 }

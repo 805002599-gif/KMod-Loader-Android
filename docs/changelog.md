@@ -31,6 +31,9 @@ nav_order: 8
 - **崩溃保护**：记录崩溃时正在运行的模组或 pak，下次启动隔离它；原因不明的连续崩溃进入安全模式（见[崩溃保护]({% link guide/safe-mode.md %})）。
 - pak 由核心在引擎就绪时挂载，比之前早约 5 秒。
 - `Events`（模组间事件总线）、`Store`（模组的持久化存储）、`Mod.data_dir`。
+- **游戏自身的网络**：服务器重定向（`kmod/net/server.json`，运行时修改内存里的服务器地址，不用重打包）；[`Net`]({% link lua-api/mod-env/net.md %})（观察、修改游戏收到的 WebSocket 消息，连接状态，`Net.send`），权限 `game_network`。
+- **模组的网络**：[WebSocket 客户端、TCP（可选 TLS）、UDP]({% link lua-api/mod-env/sockets.md %})；`Http.download` 流式下载到文件，带进度。
+- 钩子里给字符串参数赋值现在可用（引擎分配的副本）。
 - **自定义界面**：[`UI`]({% link lua-api/mod-env/ui.md %})（`UI.window`、`toast`），用游戏自己的控件搭窗口。
 - **网络**：[`Http`]({% link lua-api/mod-env/http.md %})（`get`、`post`、`request`），需要 `mod.json` 声明 `permissions: ["network"]`。
 - **心跳**：用引擎定时器驱动 tick，游戏静止时定时器不再停摆（之前在静止画面上 `ExecuteWithDelay(300)` 可能拖到几十秒）。
