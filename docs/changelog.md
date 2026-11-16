@@ -36,6 +36,12 @@ nav_order: 8
 - 钩子里给字符串参数赋值现在可用（引擎分配的副本）。
 - **自定义界面**：[`UI`]({% link lua-api/mod-env/ui.md %})（`UI.window`、`toast`），用游戏自己的控件搭窗口。
 - **网络**：[`Http`]({% link lua-api/mod-env/http.md %})（`get`、`post`、`request`），需要 `mod.json` 声明 `permissions: ["network"]`。
+- **布局检测与缓存**：用 MobileDumper-7 的检测在游戏进程里取得引擎的结构布局，按游戏版本缓存，和核心里的 SDK 对比；不一致时不加载模组（见[版本支持]({% link concepts/version-support.md %})）。控制台 `layout`。
+- **运行时反射布局**：核心的反射读取改走 `reflect.h` 的运行时布局表，检测到的引擎布局会被采用；引擎函数按类名、函数名、参数名调用，不再用 SDK 强类型包装。布局偏移变了不必重编译核心（见[版本支持]({% link concepts/version-support.md %})）。
+- **UE4SS 兼容补齐**（见 [UE4SS 兼容]({% link lua-api/global-functions/ue4ss-compat.md %})）：钩子回调的返回值可替换函数返回值；延迟动作句柄一整套（`MakeActionHandle`、`ExecuteInGameThreadWithDelay`、`LoopInGameThread*`、`Pause/Cancel…`）；`RegisterBeginPlay/EndPlay/InitGameState/LoadMap/ProcessConsoleExec` 钩子、`RegisterCustomEvent`、`RegisterCustomProperty`；`StaticConstructObject`、`ForEachUObject`、`FindObjects`、`LoadExport`、线程查询、`DumpAllObjects/Actors`、模组重启/卸载；对象方法 `IsChildOf`、`GetSuperStruct`、`ForEachProperty/Function`、`get`；`TMap`/`TSet` 可读、`TMap` 值可原位修改；委托属性（`Broadcast`、`Execute`、`IsBound`、`GetBindings`、`Clear`）；`FString`/`FText` 属性可写，数组可原位写。
+- **原生函数钩子**：蓝图虚拟机直接调用的原生函数也能钩了（参数可读可改），`GNatives` 在运行时从解释器里定位。`Net.on_send`、`Net.on_open` 补齐。
+- **蓝图脚本函数钩子**：`RegisterHook` 现在钩在引擎执行蓝图字节码的解释器上，能看到**所有**蓝图函数调用（包括蓝图直接调蓝图，之前完全看不到），参数可读可改，后置回调里能读返回值（见[钩子]({% link concepts/hooks.md %})）。
+- 修复：`GetName()` 曾在反射改造后多出实例编号后缀（`ScaleBox_2`），导致 Mods 页找错控件，已恢复。
 - **心跳**：用引擎定时器驱动 tick，游戏静止时定时器不再停摆（之前在静止画面上 `ExecuteWithDelay(300)` 可能拖到几十秒）。
 - UObject 句柄现在也比较槽位序号，对象被销毁、槽位被复用后旧句柄不会指向新对象。
 

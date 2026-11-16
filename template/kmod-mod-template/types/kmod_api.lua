@@ -331,3 +331,95 @@ function Net.is_connected() end
 function Net.url() end
 ---@return string
 function Net.redirect_status() end
+
+-- ---------------------------------------------------------------- UE4SS-compatible functions (see docs: UE4SS 兼容)
+---@return integer
+function MakeActionHandle() end
+---@overload fun(handle: integer, delayMs: integer, fn: function)
+---@param delayMs integer
+---@param fn function
+---@return integer handle
+function ExecuteInGameThreadWithDelay(delayMs, fn) end
+---@param handle integer
+---@param delayMs integer
+---@param fn function
+function RetriggerableExecuteInGameThreadWithDelay(handle, delayMs, fn) end
+---@return integer handle
+function LoopInGameThreadWithDelay(delayMs, fn) end
+---@return integer handle
+function ExecuteInGameThreadAfterFrames(frames, fn) end
+---@return integer handle
+function LoopInGameThreadAfterFrames(frames, fn) end
+---@return boolean
+function CancelDelayedAction(handle) end
+---@return boolean
+function PauseDelayedAction(handle) end
+---@return boolean
+function UnpauseDelayedAction(handle) end
+---@return boolean
+function ResetDelayedActionTimer(handle) end
+---@return boolean
+function SetDelayedActionTimer(handle, delayMs) end
+---@return integer
+function ClearAllDelayedActions() end
+---@return boolean
+function IsValidDelayedActionHandle(handle) end
+---@return boolean
+function IsDelayedActionActive(handle) end
+---@return boolean
+function IsDelayedActionPaused(handle) end
+---@return number
+function GetDelayedActionRate(handle) end
+---@return number
+function GetDelayedActionTimeRemaining(handle) end
+---@return number
+function GetDelayedActionTimeElapsed(handle) end
+---@param fn fun(actor: any)
+function RegisterBeginPlayPreHook(fn) end
+---@param fn fun(actor: any)
+function RegisterBeginPlayPostHook(fn) end
+---@param fn fun(actor: any)
+function RegisterEndPlayPreHook(fn) end
+---@param fn fun(actor: any)
+function RegisterEndPlayPostHook(fn) end
+---@param fn fun(gameState: any)
+function RegisterInitGameStatePreHook(fn) end
+---@param fn fun(gameState: any)
+function RegisterInitGameStatePostHook(fn) end
+---@param fn fun(engine: any, _: nil, worldName: string)
+function RegisterLoadMapPreHook(fn) end
+---@param fn fun(engine: any, _: nil, worldName: string)
+function RegisterLoadMapPostHook(fn) end
+---@param fn fun(context: any, fullCommand: string, parts: string[])
+function RegisterProcessConsoleExecPreHook(fn) end
+---@param fn fun(context: any, fullCommand: string, parts: string[])
+function RegisterProcessConsoleExecPostHook(fn) end
+---@param name string
+---@param fn fun(self: any, params: any)
+function RegisterCustomEvent(name, fn) end
+---@param info { Name: string, Type: string, BelongsToClass: string, OffsetInternal: integer }
+function RegisterCustomProperty(info) end
+---@param fn fun(object: any, chunk: integer, index: integer): boolean?
+function ForEachUObject(fn) end
+---@return any[]
+function FindObjects(count, className, shortName, requiredFlags, bannedFlags, exactClass) end
+---@return any
+function StaticConstructObject(class, outer) end
+---@return integer?
+function LoadExport(symbol) end
+---@return boolean
+function IsInGameThread() end
+---@return integer
+function GetGameThreadId() end
+---@return integer
+function GetCurrentThreadId() end
+---@return string path
+---@return integer count
+function DumpAllObjects(file) end
+---@return string path
+---@return integer count
+function DumpAllActors(file) end
+function RestartCurrentMod() end
+function UninstallCurrentMod() end
+function RestartMod(name) end
+function UninstallMod(name) end

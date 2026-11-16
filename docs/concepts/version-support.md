@@ -28,9 +28,45 @@ I/core: pak layer: mount fn 0x4dc0218 worker 0x4dc30f0 pak file 0x4fedc96000
 - 对象表或名字表找不到：kmod 写一条错误日志（`this game build is not supported`），**保持不活动**，游戏照常运行，不加载任何模组。
 - 只有 pak 层找不到：写警告，`kmod/paks` 不挂载，其他功能不受影响。
 
-## 仍然依赖的东西
+## 布局检测与缓存
 
-地址解析只解决"函数和全局变量在哪"。SDK 里的类布局（例如 `UObject` 的成员偏移）仍是导出那一刻的，游戏更新改了这些布局时，需要用 Dumper-7 重新导出 SDK，并运行一次 `tools/patch_sdk.py`（把 SDK 里写死的偏移改成运行时可写的变量），再重新构建核心。
+地址只是一半。SDK 里 `UObject`、`UStruct`、`UFunction`、`FField`、各种 `Property` 的**成员偏移**是编译进核心的，游戏更新改了布局时，旧偏移会读到错误的数据甚至崩溃。所以核心启动时会**对照引擎的真实布局**检查一遍：
+
+1. 用 [MobileDumper-7](https://github.com/MJx0/MobileDumper-7)（MIT）的引擎布局检测，在游戏进程里直接分析内存，得到各个偏移。它被编译成独立的 `libkmodmd7.so`，需要时才加载（避免它自带的 Unreal 包装类和核心里的 SDK 同名冲突）。
+2. 检测结果按**游戏库的版本指纹**（映射大小加代码前 1 MB 的 CRC）缓存到 `kmod/boot/layout-<指纹>.json`。同一版本只检测一次（约 15 秒），之后启动直接读缓存对比，不耗时。
+3. 与核心里编译进来的 SDK 布局逐项比较（目前 20 项：`UObject`、`UField`、`UStruct`、`UFunction`、`FField`、`Property` 的关键成员，以及 `ProcessEvent` 的虚表下标）。
+
+结果：
+
+| 情况 | 处理 |
+|---|---|
+| 全部一致 | 正常加载模组 |
+| 有差异（引擎的结构偏移挪了） | **采用引擎的真实布局**：核心的反射读取全部走运行时布局表，日志写警告并列出差异项，模组照常加载 |
+| `ProcessEvent` 虚表下标变了，或检测不出任何一项 | **不加载任何模组**（这两种情况无法适应），状态写明原因。游戏本身不受影响 |
+| 第一次遇到新版本（没缓存） | 模组等检测完成（约 15 秒）后才加载；检测器不可用时记警告，**照常加载**（未验证） |
+
+控制台：
+
+```
+layout            显示验证结果
+layout redetect   忽略缓存，重新检测（约 15 秒；之后用 reload 重新加载模组）
+```
+
+`libkmodmd7.so` 目前是**开发版的可选组件**：放在 `kmod/dev/libkmodmd7.so`。没有它时，没有缓存的新版本会是"未验证"状态。构建它需要 MobileDumper-7 的源码（CMake 变量 `KMOD_MD7_DIR`，并初始化它的 `libs/KittyMemoryEx` 子模块）。
+
+## 运行时布局表
+
+核心里所有读取反射数据的代码（对象的类、名字、外层，`UStruct` 的父类和成员链，`UFunction` 的标志和参数大小，`FField` 链，`FProperty` 及各子类的偏移，`UClass` 的默认对象）都不再用编译进来的 SDK 成员，而是通过 `reflect.h` 里的访问器读取一张**运行时布局表**：默认值取自编译进来的 SDK，检测到的值（来自 `layout.json`）会覆盖它。需要调用引擎函数（`Concat_StrStr`、`K2_SetTimer`、`GetPlayerController` 等）时，也是按**类名和函数名**在反射里查找、按参数名填值，不再用 SDK 的强类型包装。游戏引擎对象（`GameEngine`、`GameViewport`、`World`）也是按属性名读取。
+
+所以游戏更新只改动这些结构偏移时，不重编译核心也能继续运行。
+
+## 仍然编译进核心的部分
+
+- **`ProcessEvent` 的虚表下标**（编译期常量）：变了就无法适应，核心不加载模组。
+- **对象数组和名字池的布局**（`FUObjectItem` 步长、`FNamePool` 结构）：由 SDK 的访问器读取，检测结果里暂未采用。
+- **`FText` 的结构**（`TextData` 偏移、大小）和少数引擎值类型（`FString`、`FName` 的大小）。
+
+遇到这些变化，仍需用新版本重新导出 SDK 并重新构建核心。
 
 ## 开发用开关
 

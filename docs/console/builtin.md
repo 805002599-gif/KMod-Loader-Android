@@ -13,6 +13,7 @@ parent: 控制台指令
 | `safe [off]` | 查看崩溃保护状态；`safe off` 离开安全模式，见[崩溃保护]({% link guide/safe-mode.md %}) |
 | `unquarantine <mod\|pak> <名字>` | 让崩溃过的模组或 pak 重新加载 |
 | `paks [off\|on <文件>]` | 列出 `kmod/paks` 里的 pak 和状态；`off` / `on` 开关某个 pak（下次启动生效），见 [Pak 模组]({% link guide/pak-mods.md %}) |
+| `layout [redetect]` | 引擎结构布局的验证结果；`redetect` 忽略缓存重新检测，见[版本支持]({% link concepts/version-support.md %}) |
 | `selftest` | 运行一组快速自检：找对象、调用函数、JSON、pak、worker |
 | `mods` | 列出已安装的模组、版本和状态 |
 | `enable <模组id>` / `disable <模组id>` | 启用或禁用模组并重新加载 |

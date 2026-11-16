@@ -189,6 +189,14 @@ builtin("selftest", function()
   return table.concat(lines, "\n") .. "\n" .. (bad == 0 and "all checks passed" or (bad .. " check(s) failed"))
 end, "run quick health checks of the loader (objects, calls, json, paks, worker)")
 
+builtin("layout", function(args)
+  if args[1] == "redetect" then
+    kmod.detect_layout(true)
+    return "detecting the engine layout again in the background (about 15 s); run 'layout' for the result"
+  end
+  return kmod.layout_report()
+end, "show whether the engine's structure layout was verified against this kmod build; 'layout redetect' runs the detector again", "layout [redetect]")
+
 builtin("safe", function(args)
   local b = kmod.refresh_boot()
   if args[1] == "off" then

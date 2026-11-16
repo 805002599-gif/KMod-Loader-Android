@@ -23,16 +23,18 @@ local id = RegisterHook(functionPath, pre, post)
 
 函数路径解析时只比较路径最后一段起的名字（类名和函数名）。
 
+蓝图函数的所有调用（包括蓝图直接调蓝图）都会触发，见[钩子]({% link concepts/hooks.md %})。蓝图函数的参数可以在前置回调里修改，字符串参数会用引擎分配的副本替换。
+
 ## 回调参数
 
 `pre(self, params)` / `post(self, params)`：
 
 | # | 类型 | 说明 |
 |---|---|---|
-| 1 | [`UObject`]({% link lua-api/classes/uobject.md %}) | 被调用的对象（`this`），直接是对象，不需要 UE4SS 的 `:get()` |
+| 1 | [`UObject`]({% link lua-api/classes/uobject.md %}) | 被调用的对象（`this`），直接是对象；写 UE4SS 习惯的 `self:get()` 也行，返回对象本身 |
 | 2 | [`Params`]({% link lua-api/classes/params.md %}) | 函数参数，按名字读写 |
 
-回调的返回值被忽略。
+**回调返回一个值，就会替换函数的返回值**（和 UE4SS 一样）：前置回调里返回的值会被函数自己的返回值覆盖（对原生函数没有效果），所以要改结果请在**后置回调**里返回。返回 `nil`（什么都不返回）保持原值。蓝图函数的字节码已经执行完，后置回调里返回的值替换的是调用方收到的结果。不能通过返回值取消调用。
 
 ## 返回值
 

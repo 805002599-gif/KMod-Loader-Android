@@ -4,8 +4,8 @@
 --
 -- The game's WebSocketSubsystem delivers incoming messages to several listeners with OnWebSocketMessageReceived(Channel,
 -- Sender, Message, Context): a delegate broadcast, which goes through ProcessEvent, so a hook sees the strings and can replace
--- them. What the game SENDS (SendWebSocketMessage) and OpenWebSocket are called by Blueprint code directly on the native
--- function, which bypasses ProcessEvent: those cannot be observed from Lua (Net.send still works).
+-- them. What the game SENDS (SendWebSocketMessage) and OpenWebSocket are native functions the Blueprint VM calls directly,
+-- bypassing ProcessEvent: the core puts a thunk on them (see core.cpp, native function hooks) so on_send/on_open see them.
 
 local function log(...) kmod.log("info", "net", ...) end
 
@@ -81,6 +81,30 @@ function kmod.net_api(rec)
       local ok, err = pcall(api.RegisterHook, path, pre, post)
       if not ok then log("could not watch " .. path .. ": " .. tostring(err)) end
     end
+  end
+
+  -- Net.on_send(fn): fn(msg) for every message the game SENDS; msg = { channel, receiver, message, context }.
+  -- Return a table to replace fields before the message goes out. (Messages sent with Net.send are not reported.)
+  function Net.on_send(fn)
+    local ok, err = pcall(api.RegisterHook, "WebSocketSubsystem:SendWebSocketMessage", function(self, p)
+      local m = readMsg(p, "receiver")
+      local r = call(rec.id, fn, m)
+      if type(r) == "table" then applyMsg(p, "receiver", r) end
+    end)
+    if not ok then log("could not watch SendWebSocketMessage: " .. tostring(err)) end
+  end
+
+  -- Net.on_open(fn): fn({ url, token }) when the game opens its WebSocket. Return a table to change the URL or token.
+  function Net.on_open(fn)
+    local ok, err = pcall(api.RegisterHook, "WebSocketSubsystem:OpenWebSocket", function(self, p)
+      local m = { url = str(p.URL), token = str(p.Token) }
+      local r = call(rec.id, fn, m)
+      if type(r) == "table" then
+        if r.url ~= nil then p.URL = tostring(r.url) end
+        if r.token ~= nil then p.Token = tostring(r.token) end
+      end
+    end)
+    if not ok then log("could not watch OpenWebSocket: " .. tostring(err)) end
   end
 
   -- Net.on_state(fn): fn(state [, detail]) with state "open", "closed" or "failure" (detail = the error text)

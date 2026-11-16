@@ -15,6 +15,9 @@ struct PakAddrs
     uintptr_t worker = 0;       // the mount worker; x1 = { const TCHAR* path; int32 order; ... }
     void* pakFile = nullptr;    // the FPakPlatformFile object (`this`)
 };
+// Identifies this build of the engine library: "<mapped size>-<crc32 of the start of its code>".
+std::string Resolver_BuildKey();
+
 // All addresses in the module's memory where `pat` occurs (any segment).
 void Resolver_FindBytes(const void* pat, size_t n, std::vector<uintptr_t>& hits);
 

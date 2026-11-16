@@ -10,6 +10,12 @@
 #include <sys/uio.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <array>
+#include <utility>
+#include <cstddef>
+#include <map>
+#include <unordered_set>
+#include <mutex>
 #include <time.h>
 #include <unistd.h>
 #include <atomic>
@@ -28,6 +34,7 @@
 #include "resolver.h"
 #include "kmod_boot.h"
 #include "net_redirect.h"
+#include "reflect.h"
 #include "Basic.hpp"
 #include "CoreUObject_classes.hpp"
 #include "Engine_classes.hpp"
@@ -92,13 +99,178 @@ static bool InstallInlineHook(void* target, void* detour, void** outTrampoline)
 using ProcessEventFn = void (*)(UObject*, UFunction*, void*);
 static ProcessEventFn g_origPE = nullptr;
 static std::atomic<uint64_t> g_peCalls{0};
+static std::atomic<uint64_t> g_peTotal{0};
+static std::atomic<bool> g_diag{false};                // collect which functions each path sees (kmod.script_diag)
+static std::unordered_set<UFunction*> g_diagPI, g_diagPE;   // game thread only
+static std::atomic<uint64_t> g_peScript{0};           // ProcessEvent calls of Blueprint (script) functions            // every ProcessEvent call (statistics)
 static thread_local int t_gameThread = -1; // -1 unknown, 0 no, 1 yes
 static thread_local bool t_busy = false;
 
 static void OnGameTick();
+static UObject* CurrentWorld();
 // Heartbeat: an engine timer (K2_SetTimer, every ~16 ms) calls Actor.ForceNetUpdate on the PlayerController. The call goes
 // through ProcessEvent, so it drives the tick even on a static screen where the game itself calls almost nothing.
 static UFunction* g_hbFn = nullptr;
+
+// ---------------------------------------------------------------------------------------------
+// Script (Blueprint) function hooks. A Blueprint function runs through ProcessInternal(Context, Stack, Result): the VM calls
+// it directly for Blueprint-to-Blueprint calls (no ProcessEvent), and ProcessEvent reaches it too. By the time it is entered
+// the caller has evaluated the arguments into the frame's Locals, so a hook sees the parameters, can change them before the
+// function runs, and (post hook) read the return value. Native functions keep going through the ProcessEvent hook.
+// FFrame (UE 5.x): FOutputDevice base (16 bytes), Node, Object, Code, Locals.
+// ---------------------------------------------------------------------------------------------
+static const int kFrameNode = 0x10, kFrameObject = 0x18, kFrameLocals = 0x28, kCodeOff = 0x20;
+using ProcessInternalFn = void (*)(UObject*, void*, void*);
+static ProcessInternalFn g_origPI = nullptr;
+static std::atomic<bool> g_scriptHookOk{false};          // installed and the frame layout was confirmed
+static std::atomic<int> g_piChecked{0};
+static std::atomic<bool> g_piBroken{false};
+static std::atomic<uint64_t> g_piTotal{0};            // every script function call that went through the detour
+
+static std::atomic<int> g_frameChain{-1};              // FFrame::PropertyChainForCompiledIn offset (learned from script frames)
+static int g_chainSamples = 0, g_chainVotes[14] = {};
+
+static void HookedProcessInternal(UObject* ctx, void* stack, void* result)
+{
+    g_piTotal.fetch_add(1, std::memory_order_relaxed);
+    if (!g_scriptHookOk.load(std::memory_order_relaxed) && g_piBroken.load()) { g_origPI(ctx, stack, result); return; }
+    if (t_gameThread == 1 && !t_busy && stack)
+    {
+        ctx = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(stack) + kFrameObject);      // the interpreter's own Context
+        UFunction* fn = *reinterpret_cast<UFunction**>(reinterpret_cast<uint8_t*>(stack) + kFrameNode);
+        if (g_piChecked.load(std::memory_order_relaxed) < 2000)          // confirm the frame layout on the first calls
+        {
+            UObject* obj = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(stack) + kFrameObject);
+            if (obj && fn && Rf::ClassOf(reinterpret_cast<UObject*>(fn)) == Rf::FunctionClass()) g_piChecked++;
+            else { g_piBroken = true; g_scriptHookOk = false; KLog(KLOG_ERROR, "core", "script hook: unexpected FFrame layout, switched off"); g_origPI(ctx, stack, result); return; }
+            if (g_piChecked.load() >= 2000) KLog(KLOG_INFO, "core", "script hook: frame layout confirmed on 2000 calls");
+        }
+        if (g_diag.load(std::memory_order_relaxed) && fn && g_diagPI.size() < 20000) g_diagPI.insert(fn);
+        if (g_frameChain.load(std::memory_order_relaxed) < 0 && g_chainSamples < 300 && fn)       // learn where FFrame keeps its property chain
+        {
+            if (FField* pr = Rf::PropsOf(reinterpret_cast<UStruct*>(fn)))
+            {
+                g_chainSamples++;
+                for (int k = 0; k < 14; k++)
+                    if (*reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(stack) + 0x30 + k * 8) == pr) g_chainVotes[k]++;
+                if (g_chainSamples == 300)
+                {
+                    int best = 0;
+                    for (int k = 1; k < 14; k++) if (g_chainVotes[k] > g_chainVotes[best]) best = k;
+                    if (g_chainVotes[best] >= 280) { g_frameChain = 0x30 + best * 8; KLog(KLOG_INFO, "core", "script hook: FFrame property chain at +0x%x", (int)g_frameChain.load()); }
+                    else KLog(KLOG_WARN, "core", "script hook: FFrame property chain not found (best %d/300): native hooks will see parameters but not change them", g_chainVotes[best]);
+                }
+            }
+        }
+        if (fn && LuaHost_HasHook(fn))
+        {
+            uint8_t* locals = *reinterpret_cast<uint8_t**>(reinterpret_cast<uint8_t*>(stack) + kFrameLocals);
+            t_busy = true; LuaHost_PreHook(ctx, fn, locals, result); t_busy = false;
+            g_origPI(ctx, stack, result);
+            t_busy = true; LuaHost_PostHook(ctx, fn, locals, result); t_busy = false;
+            return;
+        }
+    }
+    g_origPI(ctx, stack, result);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Native function hooks for calls the Blueprint VM makes directly (they never reach ProcessEvent). The VM calls a native
+// function through UFunction::Func(Context, Stack, Result) with the arguments still sitting in the caller's BYTECODE; the
+// function's exec thunk evaluates them. A hooked native function gets a small per-function thunk in place of Func: it
+// evaluates the arguments itself with the engine's own opcode table (GNatives, found at run time), runs the Lua hooks on that
+// buffer, and calls the original thunk with a synthetic frame (Code = null, Locals = our buffer: the same shape ProcessEvent
+// uses), so changed arguments reach the function. Calls that come through ProcessEvent are left to the ProcessEvent detour.
+// Not supported: functions with non-const reference/out parameters (their value lives in the caller's variable).
+// ---------------------------------------------------------------------------------------------
+using NativeFn = void (*)(UObject*, void*, void*);
+struct NatSlot { UFunction* fn = nullptr; NativeFn orig = nullptr; std::vector<int> offs; size_t bufSize = 0; bool vmOk = false; };
+static const int kNatSlots = 64;
+static NatSlot g_nat[kNatSlots];
+static std::atomic<int> g_natCount{0};
+static uintptr_t* g_gnatives = nullptr;
+static std::atomic<uint64_t> g_natVmCalls{0};
+
+static void NatDispatch(int n, UObject* self, void* stack, void* result)
+{
+    NatSlot& s = g_nat[n];
+    uint8_t* st = reinterpret_cast<uint8_t*>(stack);
+    if (!s.vmOk || t_gameThread != 1 || t_busy || !st || !LuaHost_HasHook(s.fn)) { s.orig(self, stack, result); return; }
+    uint8_t*& code = *reinterpret_cast<uint8_t**>(st + kCodeOff);
+    if (*reinterpret_cast<UFunction**>(st + kFrameNode) == s.fn || !code) { s.orig(self, stack, result); return; }   // ProcessEvent path
+    UObject* ctxObj = *reinterpret_cast<UObject**>(st + kFrameObject);
+    uint8_t* const start = code;
+    std::vector<uint8_t> buf(s.bufSize, 0);
+    for (int off : s.offs)                                                       // FFrame::Step for each argument, in declaration order
+    {
+        uint8_t op = *code++;
+        reinterpret_cast<NativeFn>(g_gnatives[op])(ctxObj, stack, buf.data() + off);
+    }
+    if (*code != 0x16)                                                           // EX_EndFunctionParms expected: otherwise let the function read its own arguments
+    {
+        code = start;
+        s.orig(self, stack, result);
+        return;
+    }
+    g_natVmCalls.fetch_add(1, std::memory_order_relaxed);
+    uint8_t* const after = code + 1;
+    t_busy = true; LuaHost_PreHook(self, s.fn, buf.data(), result); t_busy = false;
+    int chain = g_frameChain.load(std::memory_order_relaxed);
+    if (chain >= 0)
+    {
+        uint8_t fake[0xC0];
+        memcpy(fake, st, sizeof(fake));
+        *reinterpret_cast<UFunction**>(fake + kFrameNode) = s.fn;
+        *reinterpret_cast<uint8_t**>(fake + kCodeOff) = nullptr;
+        *reinterpret_cast<uint8_t**>(fake + kFrameLocals) = buf.data();
+        *reinterpret_cast<FField**>(fake + chain) = Rf::PropsOf(reinterpret_cast<UStruct*>(s.fn));
+        s.orig(self, fake, result);
+        code = after;
+    }
+    else { code = start; s.orig(self, stack, result); }                          // read-only: the function evaluates the original bytecode again
+    t_busy = true; LuaHost_PostHook(self, s.fn, buf.data(), result); t_busy = false;
+}
+
+template <int N> static void NatThunk(UObject* self, void* stack, void* result) { NatDispatch(N, self, stack, result); }
+template <int... I> static std::array<NativeFn, sizeof...(I)> MakeThunks(std::integer_sequence<int, I...>) { return {{&NatThunk<I>...}}; }
+
+// Called when a hook is registered. A Blueprint function needs nothing (the interpreter hook sees it). Returns false with a
+// note when calls the Blueprint VM makes to this native function will not be seen.
+bool KMod_EnsureNativeHook(UFunction* fn, std::string& note)
+{
+    if (!fn || !(Rf::FuncFlagsOf(fn) & 0x400)) return true;
+    int cnt = g_natCount.load();
+    for (int i = 0; i < cnt; i++) if (g_nat[i].fn == fn) return g_nat[i].vmOk;
+    if (!g_gnatives) { note = "calls the Blueprint VM makes to this native function cannot be seen (opcode table not found); calls through ProcessEvent still are"; return false; }
+    if (cnt >= kNatSlots) { note = "too many native function hooks"; return false; }
+    uintptr_t* slot = reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(fn) + Rf::L.ufunc_exec);
+    if (!*slot) { note = "the function has no native entry"; return false; }
+    NatSlot& s = g_nat[cnt];
+    s.fn = fn; s.orig = reinterpret_cast<NativeFn>(*slot); s.vmOk = true;
+    size_t sz = Rf::ParamSizeOf(fn);
+    for (FField* f = Rf::PropsOf(reinterpret_cast<UStruct*>(fn)); f; f = Rf::NextOf(f))
+    {
+        FProperty* p = reinterpret_cast<FProperty*>(f);
+        uint64_t fl = Rf::PropFlagsOf(p);
+        if (!(fl & 0x80)) continue;
+        sz = std::max<size_t>(sz, Rf::OffsetOf(p) + (size_t)Rf::ElemSizeOf(p) * std::max(1, Rf::ArrayDimOf(p)));
+        if (fl & 0x400) continue;                                                // return value: not in the bytecode
+        if ((fl & 0x100) && !(fl & 0x2)) s.vmOk = false;                         // non-const out/reference parameter
+        s.offs.push_back(Rf::OffsetOf(p));
+    }
+    s.bufSize = sz + 64;
+    static const auto thunks = MakeThunks(std::make_integer_sequence<int, kNatSlots>());
+    g_natCount.store(cnt + 1);
+    if (!s.vmOk) { note = "the function has a reference/out parameter: calls from Blueprint cannot be hooked"; return false; }
+    *slot = reinterpret_cast<uintptr_t>(thunks[cnt]);
+    Log("native hook: %s (%d arguments%s)", Rf::PathName(reinterpret_cast<UObject*>(fn)).c_str(), (int)s.offs.size(), g_frameChain.load() >= 0 ? "" : ", read-only");
+    return true;
+}
+
+void KMod_NativeStats(unsigned long long& vmCalls, int& slots, bool& haveTable, int& chain)
+{
+    vmCalls = g_natVmCalls.load(); slots = g_natCount.load(); haveTable = g_gnatives != nullptr; chain = g_frameChain.load();
+}
 
 static double NowSec()
 {
@@ -108,6 +280,12 @@ static double NowSec()
 
 static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
 {
+    g_peTotal.fetch_add(1, std::memory_order_relaxed);
+    if (fn && (Rf::FuncFlagsOf(fn) & 0x400) == 0)
+    {
+        g_peScript.fetch_add(1, std::memory_order_relaxed);
+        if (g_diag.load(std::memory_order_relaxed) && t_gameThread == 1 && g_diagPE.size() < 20000) g_diagPE.insert(fn);
+    }
     if (t_gameThread < 0)
     {
         char name[32] = {};
@@ -117,7 +295,9 @@ static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
         Log("ProcessEvent first seen on thread '%s' tid=%d -> gameThread=%d", name, (int)gettid(), t_gameThread);
     }
 
-    const bool hooked = t_gameThread == 1 && !t_busy && LuaHost_HasHook(fn);
+    // a Blueprint function is handled by the ProcessInternal detour (which also sees it when ProcessEvent runs it)
+    const bool hooked = t_gameThread == 1 && !t_busy && LuaHost_HasHook(fn) &&
+                        !(g_scriptHookOk.load(std::memory_order_relaxed) && (Rf::FuncFlagsOf(fn) & 0x400) == 0);
     if (hooked) { t_busy = true; LuaHost_PreHook(self, fn, parms); t_busy = false; }
 
     g_origPE(self, fn, parms);
@@ -268,6 +448,274 @@ std::vector<std::pair<std::string, std::string>> KMod_PakStatus()
     return out;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Layout detection: libkmodmd7.so (MobileDumper-7 run in-process, see core/md7) writes the engine's structure layout to
+// <root>/boot/layout.json; here it is compared with the layout the SDK compiled into this core assumes.
+// ---------------------------------------------------------------------------------------------
+static std::atomic<int> g_layoutState{0};              // 0 idle, 1 running, 2 done
+static std::atomic<bool> g_layoutGate{false};          // open = the Lua host may start (verification finished or not possible)
+static std::atomic<bool> g_layoutMismatch{false};      // the engine's layout differs from the SDK compiled into this core
+static std::string g_layoutReport = "layout verification has not run";
+static std::mutex g_layoutMu;
+
+static long long JsonNum(const std::string& js, const char* key, long long def = -9999)
+{
+    size_t k = js.find(std::string("\"") + key + "\"");
+    if (k == std::string::npos) return def;
+    size_t c = js.find(':', k);
+    return c == std::string::npos ? def : atoll(js.c_str() + c + 1);
+}
+
+static std::string PackageName()
+{
+    char buf[256] = {};
+    if (FILE* f = fopen("/proc/self/cmdline", "r")) { size_t n = fread(buf, 1, sizeof(buf) - 1, f); fclose(f); buf[n] = 0; }
+    return buf;
+}
+
+static std::string ReadWhole(const std::string& p)
+{
+    std::string out;
+    if (FILE* f = fopen(p.c_str(), "rb")) { char b[4096]; size_t n; while ((n = fread(b, 1, sizeof(b), f)) > 0) out.append(b, n); fclose(f); }
+    return out;
+}
+
+// Compares a layout.json with the layout the SDK compiled into this core assumes.
+static void EvaluateLayout(const std::string& js, const std::string& origin, double secs)
+{
+    struct Item { const char* key; long long compiled; };
+    const Item items[] = {
+        {"UObject.Flags", (long long)offsetof(UObject, Flags)}, {"UObject.Index", (long long)offsetof(UObject, Index)},
+        {"UObject.Class", (long long)offsetof(UObject, Class)}, {"UObject.Name", (long long)offsetof(UObject, Name)},
+        {"UObject.Outer", (long long)offsetof(UObject, Outer)},
+        {"UField.Next", (long long)offsetof(UField, Next)},
+        {"UStruct.SuperStruct", (long long)offsetof(UStruct, SuperStruct)}, {"UStruct.Children", (long long)offsetof(UStruct, Children)},
+        {"UStruct.ChildProperties", (long long)offsetof(UStruct, ChildProperties)}, {"UStruct.Size", (long long)offsetof(UStruct, Size)},
+        {"UFunction.FunctionFlags", (long long)offsetof(UFunction, FunctionFlags)}, {"UFunction.ExecFunction", (long long)offsetof(UFunction, ExecFunction)},
+        {"FField.Next", (long long)offsetof(FField, Next)}, {"FField.Name", (long long)offsetof(FField, Name)},
+        {"FField.Class", (long long)offsetof(FField, ClassPrivate)},
+        {"Property.ArrayDim", (long long)offsetof(FProperty, ArrayDim)}, {"Property.ElementSize", (long long)offsetof(FProperty, ElementSize)},
+        {"Property.PropertyFlags", (long long)offsetof(FProperty, PropertyFlags)}, {"Property.Offset_Internal", (long long)offsetof(FProperty, Offset)},
+        {"Statics.PEIndex", (long long)Offsets::ProcessEventIdx},
+    };
+    int same = 0, diff = 0, missing = 0;
+    std::string diffs;
+    bool peMoved = false;
+    for (auto& it : items)
+    {
+        long long det = JsonNum(js, it.key);
+        if (det == -9999) { missing++; continue; }
+        if (det == it.compiled) same++;
+        else
+        {
+            diff++;
+            if (strcmp(it.key, "Statics.PEIndex") == 0) peMoved = true;     // baked into the SDK's ProcessEvent: cannot be adopted
+            char b[120]; snprintf(b, sizeof(b), " %s: engine 0x%llx, SDK 0x%llx;", it.key, det, it.compiled); diffs += b;
+        }
+    }
+    Rf::Load(js);                                  // from here on all reflection reads use the engine's real layout
+    char head[220];
+    snprintf(head, sizeof(head), "engine layout (%s%s): %d value(s) match the SDK in this core, %d differ, %d not reported.",
+             origin.c_str(), secs > 0 ? (", detected in " + std::to_string((int)secs) + " s").c_str() : "", same, diff, missing);
+    std::string rep = std::string(head) + diffs;
+    bool block = peMoved || same == 0;
+    if (block) { g_layoutMismatch = true; rep += " -> mods are NOT loaded (the layout cannot be adopted)."; }
+    else if (diff > 0) rep += " -> adopted: the engine's layout is used instead of the SDK's.";
+    { std::lock_guard<std::mutex> g(g_layoutMu); g_layoutReport = rep; }
+    KLog(block ? KLOG_ERROR : (diff > 0 ? KLOG_WARN : KLOG_INFO), "layout", "%s", rep.c_str());
+}
+
+// The detector: libkmodmd7.so, bundled with the app (release) or at kmod/dev/ (development).
+static void* OpenDetector(const std::string& pkg)
+{
+    if (void* h = dlopen("libkmodmd7.so", RTLD_NOW | RTLD_LOCAL)) return h;
+    std::string src = KModRoot() + "/dev/libkmodmd7.so";
+    std::string dstDir = "/data/data/" + pkg + "/files/kmod";
+    std::string dst = dstDir + "/libkmodmd7.so";
+    FILE* in = fopen(src.c_str(), "rb");
+    if (!in) return nullptr;
+    mkdir(dstDir.c_str(), 0777);
+    FILE* out = fopen(dst.c_str(), "wb");
+    if (!out) { fclose(in); return nullptr; }
+    char b[65536]; size_t n;
+    while ((n = fread(b, 1, sizeof(b), in)) > 0) fwrite(b, 1, n, out);
+    fclose(in); fclose(out);
+    return dlopen(dst.c_str(), RTLD_NOW | RTLD_LOCAL);
+}
+
+// Verification: a cached layout.json for this engine build is compared at once; without one the detector runs (about 15 s)
+// and its result is cached. The Lua host waits for this (g_layoutGate) so no mod runs on an unverified layout.
+static void LayoutMain(bool force)
+{
+    struct Gate { ~Gate() { g_layoutState = 2; g_layoutGate = true; } } gate;
+    std::string key = Resolver_BuildKey();
+    if (key.empty()) { std::lock_guard<std::mutex> g(g_layoutMu); g_layoutReport = "layout verification skipped (engine library not found)"; return; }
+    mkdir((KModRoot() + "/boot").c_str(), 0777);
+    std::string cache = KModRoot() + "/boot/layout-" + key + ".json";
+    if (!force)
+    {
+        std::string js = ReadWhole(cache);
+        if (js.find("\"ok\"") != std::string::npos) { EvaluateLayout(js, "cached", 0); return; }
+    }
+    std::string pkg = PackageName();
+    void* h = OpenDetector(pkg);
+    using Fn = int (*)(const char*, const char*, const char*);
+    Fn run = h ? reinterpret_cast<Fn>(dlsym(h, "kmod_md7_run")) : nullptr;
+    if (!run)
+    {
+        std::lock_guard<std::mutex> g(g_layoutMu);
+        g_layoutReport = "engine layout not verified: no cached result for build " + key + " and libkmodmd7.so is not available";
+        KLog(KLOG_WARN, "layout", "%s", g_layoutReport.c_str());
+        return;
+    }
+    remove(cache.c_str());
+    double t0 = NowSec();
+    int rc = run(pkg.c_str(), cache.c_str(), (KModRoot() + "/logs/md7.log").c_str());
+    double secs = NowSec() - t0;
+    if (rc != 0)
+    {
+        std::lock_guard<std::mutex> g(g_layoutMu);
+        g_layoutReport = "engine layout detection failed (see logs/md7.log); continuing unverified";
+        KLog(KLOG_WARN, "layout", "%s", g_layoutReport.c_str());
+        return;
+    }
+    EvaluateLayout(ReadWhole(cache), "detected", secs);
+}
+
+// Starts the verification in the background. force = ignore the cache and detect again.
+bool KMod_DetectLayout(bool force)
+{
+    int expected = 0;
+    if (force) { g_layoutState = 0; g_layoutMismatch = false; }
+    if (!g_layoutState.compare_exchange_strong(expected, 1) && !force) return false;
+    if (force) g_layoutState = 1;
+    std::thread(LayoutMain, force).detach();
+    return true;
+}
+
+std::string KMod_LayoutReport()
+{
+    std::lock_guard<std::mutex> g(g_layoutMu);
+    return std::string(g_layoutState == 1 ? "running... " : "") + g_layoutReport;
+}
+
+bool KMod_LayoutMismatch() { return g_layoutMismatch.load(); }
+
+// Diagnostics: kmod.script_diag(true) starts collecting, kmod.script_diag(false) stops and returns the paths of the script
+// functions that ran through ProcessInternal but never through ProcessEvent: calls the Blueprint VM made directly.
+std::vector<std::string> KMod_ScriptDiag(bool start)
+{
+    std::vector<std::string> out;
+    if (start) { g_diagPI.clear(); g_diagPE.clear(); g_diag = true; return out; }
+    g_diag = false;
+    for (UFunction* f : g_diagPI)
+        if (!g_diagPE.count(f) && out.size() < 40) out.push_back(Rf::PathName(reinterpret_cast<UObject*>(f)));
+    out.push_back("-- seen via ProcessInternal: " + std::to_string(g_diagPI.size()) + ", via ProcessEvent: " + std::to_string(g_diagPE.size()));
+    g_diagPI.clear(); g_diagPE.clear();
+    return out;
+}
+
+// Counters for the script-function hook: calls that went through ProcessInternal, and through ProcessEvent.
+void KMod_ScriptStats(unsigned long long& pi, unsigned long long& pe, bool& installed)
+{
+    pi = g_piTotal.load(); pe = g_peScript.load(); installed = g_scriptHookOk.load();   // pe here = ProcessEvent calls of script functions
+}
+
+// Finds ProcessInternal as the ExecFunction that every script (non-native) UFunction shares, and hooks it.
+static void EnsureScriptHook(uintptr_t base)
+{
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+    UClass* fcls = Rf::FunctionClass();
+    TUObjectArray* arr = InSDKUtils::GetGObjects();
+    if (!fcls || !arr) return;
+    std::map<uintptr_t, int> votes;
+    int seen = 0;
+    for (int32_t i = 0; i < arr->Num() && seen < 600; i++)
+    {
+        FUObjectItem* it = ObjRef::ItemAt(i);
+        UObject* o = it ? it->Object : nullptr;
+        if (!o || !ObjRef::ItemUsable(it) || Rf::ClassOf(o) != fcls) continue;
+        if (Rf::FuncFlagsOf(reinterpret_cast<UFunction*>(o)) & 0x400) continue;            // native
+        uintptr_t f = Rf::At<uintptr_t>(o, Rf::L.ufunc_exec);
+        if (f) { votes[f]++; seen++; }
+    }
+    uintptr_t best = 0; int bestN = 0;
+    for (auto& kv : votes) if (kv.second > bestN) { best = kv.first; bestN = kv.second; }
+    if (!best || seen < 50 || bestN * 10 < seen * 9)
+    {
+        KLog(KLOG_WARN, "core", "script hook: no common ProcessInternal found (%d of %d); Blueprint-internal calls stay invisible", bestN, seen);
+        return;
+    }
+    // ProcessInternal (the shared ExecFunction) ends by jumping to ProcessLocalScriptFunction, the bytecode interpreter (a loop
+    // dispatching through GNatives[opcode]); the Blueprint VM calls that interpreter directly for Blueprint-to-Blueprint calls.
+    // It is the one place every script call passes: find the branch target whose first instructions index a table by opcode.
+    uintptr_t plsf = 0;
+    {
+        const uint32_t* code = reinterpret_cast<const uint32_t*>(best);
+        for (int i = 0; i < 0x180 && !plsf; i++)
+        {
+            uint32_t ins = code[i];
+            if ((ins & 0xFC000000) != 0x14000000) continue;                                  // B (unconditional)
+            int64_t imm = ins & 0x3ffffff; if (imm & 0x2000000) imm -= 0x4000000;
+            uintptr_t target = best + (uintptr_t)i * 4 + imm * 4;
+            if (target <= best || target > best + 0x800) continue;
+            const uint32_t* t = reinterpret_cast<const uint32_t*>(target);
+            bool tableLoad = false, call = false;
+            for (int k = 0; k < 0x24; k++)
+            {
+                if ((t[k] & 0xFFE0FC00) == 0xF8607800) tableLoad = true;                      // ldr Xt, [Xn, Xm, lsl #3]
+                if ((t[k] & 0xFFFFFC1F) == 0xD63F0000) call = true;                           // blr Xn
+            }
+            if (tableLoad && call) plsf = target;
+        }
+    }
+    uintptr_t hookAt = plsf ? plsf : 0;
+    if (plsf)
+    {
+        // GNatives: the interpreter loads its address with adrp+add and then indexes it by opcode (ldr Xt,[Xn,Xm,lsl #3]).
+        const uint32_t* t = reinterpret_cast<const uint32_t*>(plsf);
+        for (int i = 0; i < 0x30 && !g_gnatives; i++)
+        {
+            uint32_t a = t[i];
+            if ((a & 0x9F000000) != 0x90000000) continue;                                 // adrp
+            int rd = a & 31;
+            int64_t imm = (int64_t)((((a >> 5) & 0x7FFFF) << 2) | ((a >> 29) & 3));
+            if (imm & 0x100000) imm -= 0x200000;
+            uintptr_t page = ((plsf + (uintptr_t)i * 4) & ~(uintptr_t)0xFFF) + (uintptr_t)(imm << 12);
+            for (int j = i + 1; j < i + 4 && j < 0x30; j++)
+            {
+                uint32_t b = t[j];
+                if ((b & 0xFFC00000) != 0x91000000 || (int)(b & 31) != rd || (int)((b >> 5) & 31) != rd) continue;   // add Xd, Xd, #imm
+                uintptr_t tbl = page + ((b >> 10) & 0xFFF);
+                bool indexed = false;
+                for (int k = j + 1; k < 0x30; k++) if ((t[k] & 0xFFE0FC00) == 0xF8607800 && (int)((t[k] >> 5) & 31) == rd) indexed = true;
+                if (!indexed) continue;
+                const uintptr_t* e = reinterpret_cast<const uintptr_t*>(tbl);
+                int good = 0;
+                for (int q = 0; q < 256; q++) if (e[q] > base && e[q] < base + 0x20000000 && (e[q] & 3) == 0) good++;
+                if (good >= 250) { g_gnatives = const_cast<uintptr_t*>(e); Log("GNatives at 0x%lx (%d/256 entries valid)", (unsigned long)(tbl - base), good); }
+            }
+        }
+        if (!g_gnatives) KLog(KLOG_WARN, "core", "script hook: opcode table (GNatives) not found; native functions called from Blueprint stay invisible");
+    }
+    if (!hookAt)
+    {
+        KLog(KLOG_WARN, "core", "script hook: ProcessLocalScriptFunction not found behind ProcessInternal 0x%lx; Blueprint-internal calls stay invisible", (unsigned long)(best - base));
+        return;
+    }
+    void* tramp = nullptr;
+    if (!InstallInlineHook(reinterpret_cast<void*>(hookAt), reinterpret_cast<void*>(&HookedProcessInternal), &tramp))
+    {
+        KLog(KLOG_WARN, "core", "script hook: cannot hook the script interpreter at 0x%lx", (unsigned long)(hookAt - base));
+        return;
+    }
+    g_origPI = reinterpret_cast<ProcessInternalFn>(tramp);
+    g_scriptHookOk = true;
+    Log("script hook installed: interpreter at 0x%lx (ProcessInternal 0x%lx, %d/%d script functions share it)", (unsigned long)(hookAt - base), (unsigned long)(best - base), bestN, seen);
+}
+
 static double g_readySince = 0;
 static double g_lastHeartbeatArm = 0;
 
@@ -276,21 +724,57 @@ static void ArmHeartbeat(double now)
 {
     if (now - g_lastHeartbeatArm < 2.0) return;
     g_lastHeartbeatArm = now;
-    UWorld* world = UWorld::GetWorld();
+    UObject* world = CurrentWorld();
     if (!world) return;
-    UObject* pc = UGameplayStatics::GetPlayerController(world, 0);
+    Rf::Args gp = Rf::Prepare("GameplayStatics", "GetPlayerController");
+    gp.Set("WorldContextObject", world).Set("PlayerIndex", (int32_t)0);
+    gp.Call(Rf::CdoFor("GameplayStatics"));
+    UObject* pc = gp.Get<UObject*>("ReturnValue");
     if (!pc) return;
-    if (!g_hbFn) g_hbFn = APlayerController::StaticClass()->GetFunction("Actor", "ForceNetUpdate");
+    if (!g_hbFn) g_hbFn = Rf::FindFunc(reinterpret_cast<UStruct*>(Rf::ClassOf(pc)), "ForceNetUpdate");
     if (!g_hbFn) return;
-    UKismetSystemLibrary::K2_SetTimer(pc, FString(u"ForceNetUpdate"), 0.016f, true, false, 0.f, 0.f);
+    Rf::Args t = Rf::Prepare("KismetSystemLibrary", "K2_SetTimer");
+    static const char16_t kName[] = u"ForceNetUpdate";
+    t.Set("Object", pc).Set("FunctionName", FString(const_cast<TCHAR*>(reinterpret_cast<const TCHAR*>(kName)), 15, 15));
+    t.Set("Time", 0.016f).Set("bLooping", true).Set("bMaxOncePerFrame", false).Set("InitialStartDelay", 0.f).Set("InitialStartDelayVariance", 0.f);
+    t.Call(Rf::CdoFor("KismetSystemLibrary"));
+}
+
+// The game engine object (cached), its viewport and world: read by property name through the runtime reflection layer.
+static UObject* CurrentWorld()
+{
+    static UObject* engine = nullptr;
+    static int32_t engineIdx = -1;
+    if (engine)                                                   // still the same live object?
+    {
+        FUObjectItem* it = ObjRef::ItemAt(engineIdx);
+        if (!it || it->Object != engine || !ObjRef::ItemUsable(it)) engine = nullptr;
+    }
+    if (!engine)
+    {
+        engine = Rf::FindFirst("GameEngine");
+        if (!engine) return nullptr;
+        engineIdx = Rf::IndexOf(engine);
+    }
+    UObject* vp = Rf::ObjProp(engine, "GameViewport");
+    return vp ? Rf::ObjProp(vp, "World") : nullptr;
 }
 
 // Runs on the game thread (throttled ~20 Hz) from the ProcessEvent hook.
 static void OnGameTick()
 {
-    UEngine* engine = UEngine::GetEngine();
-    if (!engine || !engine->GameViewport) return;
-    if (!UWorld::GetWorld()) return;
+    // Nothing that reads reflection data may run before the engine's layout was checked (and, if it moved, adopted):
+    // the first run on a new game build detects it first (about 15 s).
+    static double gateSince = 0;
+    if (!g_layoutGate.load())
+    {
+        double t = NowSec();
+        if (gateSince == 0) gateSince = t;
+        if (t - gateSince < 90.0) return;
+        g_layoutGate = true;
+    }
+    if (!CurrentWorld()) return;
+    EnsureScriptHook(InSDKUtils::GetImageBase());          // once, with the engine layout already adopted
 
     double now = NowSec();
     if (g_readySince == 0) { g_readySince = now; Log("engine ready"); KMod_MountPendingPaks(); }
@@ -338,6 +822,7 @@ static void InitThread()
     g_origPE = reinterpret_cast<ProcessEventFn>(tramp);
     Log("ProcessEvent hook installed, trampoline=%p", tramp);
     KLogInstallCrashHandlers();      // the engine installs its own handlers during start-up; (re)install ours on top of them
+    KMod_DetectLayout(false);        // verify the engine layout against the SDK in this core (cached per game build)
 }
 
 __attribute__((constructor)) static void CoreMain()

@@ -21,11 +21,11 @@ end
 ```
 
 - 读属性、写属性、调用函数都按虚幻的反射名字，和蓝图里看到的名字一致。属性名和下面的方法重名时，方法优先，用 `GetPropertyValue` / `SetPropertyValue` 显式读写。
-- 数值、布尔、字符串直接转成 Lua 值；对象指针返回另一个 `UObject`；结构体和数组也会转成 Lua 值。个别复杂类型（如委托、Map、Set）暂未完整支持，用前先在开发版控制台里试。
+- 数值、布尔、字符串直接转成 Lua 值；对象指针返回另一个 `UObject`；结构体和数组也会转成 Lua 值。`TMap`/`TSet` 可读，委托属性读成带 `Broadcast` 等方法的代理；各类型的读写范围见 [UE4SS 兼容]({% link lua-api/global-functions/ue4ss-compat.md %})。
 - 函数调用的返回：先是返回值，再是各个输出参数，按声明顺序依次返回。
 
 {: .note }
-> 带文本（`FText`、`FString`）的**对象属性**不能直接赋值，只能通过函数设置，如 `widget:SetText("...")`。作为**函数参数**传字符串是支持的。
+> `FText`、`FString` 的对象属性现在可以直接赋值。对 UI 控件，仍然推荐 `widget:SetText("...")`，因为控件要刷新显示。
 
 ## 方法
 
@@ -68,3 +68,7 @@ end
 ## 比较
 
 两个包装用 `==` 比较时，指向同一个游戏对象就相等。
+
+## 类和结构体对象上的方法
+
+`cls:IsChildOf(other)`、`cls:GetSuperStruct()`、`cls:GetCDO()`、`struct:ForEachProperty(fn)`、`struct:ForEachFunction(fn)`；任意对象都有 `obj:get()`（返回自己，兼容 UE4SS 的写法）。见 [UE4SS 兼容]({% link lua-api/global-functions/ue4ss-compat.md %})。

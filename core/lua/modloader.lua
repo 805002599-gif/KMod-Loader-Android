@@ -548,6 +548,7 @@ local function loadOne(rec)
   }
   if kmod.console_api then env.Console = kmod.console_api(rec) end
   env.require = makeRequire(rec, env)
+  if kmod.ue4ss_api then kmod.ue4ss_api(rec, env) end                -- delayed actions, lifecycle hooks, mod management (ue4ss.lua)
   local chunk, err = loadfile(rec.entry, "t", env)
   if not chunk then rec.status = "load error: " .. tostring(err); kmod._status[rec.id] = rec.status; loge(rec.id .. ": " .. rec.status); return end
   kmod.set_activity("mod", rec.id, "load")        -- a crash while the mod's main.lua runs is blamed on it
@@ -611,7 +612,9 @@ function kmod.load_mods()
     for _, w in ipairs(rec.warnings) do logw(rec.id .. ": " .. w) end
     for _, e in ipairs(rec.errors) do logw(rec.id .. ": " .. e) end
     if rec.enabled and #rec.errors == 0 then
-      if kmod.boot.safe then
+      if kmod.boot.layout_mismatch then
+        rec.status = "not loaded: this game build's engine layout differs from the one kmod was built for"; kmod._status[rec.id] = rec.status
+      elseif kmod.boot.safe then
         rec.status = "not loaded: safe mode"; kmod._status[rec.id] = rec.status
       elseif kmod.boot.mods[rec.id] then
         rec.status = "not loaded: it crashed the game (enable it again to retry)"; kmod._status[rec.id] = rec.status

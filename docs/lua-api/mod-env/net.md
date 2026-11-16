@@ -15,7 +15,7 @@ grand_parent: Lua API
 |---|---|
 | 游戏的 HTTP 请求（登录、配置、商店……） | 是引擎的原生代码，Lua 看不到。能做的是**改服务器地址**（见下面的重定向） |
 | 游戏的 WebSocket **收到**的消息 | 可以观察，也可以修改 |
-| 游戏的 WebSocket **发出**的消息、连接的建立 | 蓝图直接调用原生函数，不经过 `ProcessEvent`，**Lua 看不到**。`Net.send` 可以主动发 |
+| 游戏的 WebSocket **发出**的消息、连接的建立 | 可以观察，也可以修改：`Net.on_send`、`Net.on_open`（见下）。`Net.send` 可以主动发 |
 | 连接状态（打开、关闭、失败） | 可以观察 |
 
 ## 服务器重定向
@@ -70,3 +70,10 @@ Net.send("channel", "receiver", "message", "context")
 ## 权限
 
 `game_network` 是声明，不是沙箱（见 [Http]({% link lua-api/mod-env/http.md %}) 的说明）。能改游戏收到的消息的模组可以影响游戏行为，只安装你信任的模组。
+
+## `Net.on_send(fn)` 和 `Net.on_open(fn)`
+
+- `Net.on_send(fn)`：游戏每发一条消息就调用 `fn(msg)`，`msg = { channel, receiver, message, context }`。返回一张表可以替换其中的字段。`Net.send` 发的消息不会触发。
+- `Net.on_open(fn)`：游戏打开 WebSocket 时调用 `fn({ url, token })`，返回表可以改地址或令牌。
+
+它们依赖原生函数钩子（见[钩子]({% link concepts/hooks.md %})）。

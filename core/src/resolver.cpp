@@ -1,6 +1,7 @@
 #include "resolver.h"
 
 #include <link.h>
+#include <zlib.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <cstdio>
@@ -291,4 +292,16 @@ void Resolver_FindBytes(const void* pat, size_t n, std::vector<uintptr_t>& hits)
             p += adv; left -= adv;
         }
     }
+}
+
+std::string Resolver_BuildKey()
+{
+    LoadSegs();
+    if (g_segs.empty()) return "";
+    uLong crc = crc32(0L, Z_NULL, 0);
+    for (auto& s : g_segs)
+        if (s.flags & PF_X) { crc = crc32(crc, reinterpret_cast<const Bytef*>(s.lo), (uInt)std::min<size_t>(s.hi - s.lo, 1u << 20)); break; }
+    char b[64];
+    snprintf(b, sizeof(b), "%lx-%08lx", (unsigned long)(g_modHi - g_modLo), (unsigned long)crc);
+    return b;
 }
