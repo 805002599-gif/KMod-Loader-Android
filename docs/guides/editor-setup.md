@@ -70,4 +70,5 @@ pc:ClientRestart(somePawn)                    -- 悬停显示参数 NewPawn: Paw
 - **游戏更新后重新运行**，声明会和新版本对上。
 - 同名类（不同包里短名相同）只保留第一个。
 - 声明文件是生成的，不要手改；它们体积大，也包含游戏的类结构，**不要提交到公开仓库**。
-- 这一功能在 Android 上生成并检查过格式（每行都是合法注释，抽查了 `PlayerController`、`KardsPlayerController` 的继承关系和函数签名）。我没有在 VS Code / LuaLS 里实际加载过这些文件，补全和警告的效果还没验证。
+- **验证情况**：用 LuaLS 3.19.2 的命令行检查模式加载了在手机上生成的全部 198 个文件（5.8 MB，约 30 秒），生成的声明本身没有任何错误或警告。写错属性名（`pc.bShowMouseCursorTYPO = true`）、写错函数名（`pc:ClientIgnoreLookInputTYPO()`）、访问不存在的字段（`pc.AcknowledgedPawn.NoSuchThing`）、写错 `Log.infoo` 都会被报出来。没有在 VS Code 的界面里实际看过补全弹窗，也没测过悬停显示。
+- LuaLS 默认不检查运算符两边的类型：比如对 `boolean` 属性做加法不会报错。

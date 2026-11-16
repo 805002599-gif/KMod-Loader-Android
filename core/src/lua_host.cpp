@@ -892,10 +892,13 @@ int Kmod_DumpTypes(lua_State* L)
         if (st->SuperStruct) { std::string sup = LuaIdent(st->SuperStruct->GetName()); if (sup != name) out += " : " + sup; }
         else if (isClass) out += " : KObject";
         out += "\n";
+        std::set<std::string> seen;                                  // a field name may only be declared once per class
         for (FField* f = st->ChildProperties; f; f = f->Next)
         {
             FProperty* p = static_cast<FProperty*>(f);
-            out += "---@field " + LuaIdent(f->Name.ToString()) + " " + LuaType(p) + "\n";
+            std::string fname = LuaIdent(f->Name.ToString());
+            if (!seen.insert(fname).second) continue;
+            out += "---@field " + fname + " " + LuaType(p) + "\n";
         }
         if (isClass)
         {
@@ -904,7 +907,10 @@ int Kmod_DumpTypes(lua_State* L)
             {
                 if (f->Class != fcls) continue;
                 UFunction* fn = static_cast<UFunction*>(f);
+                std::string fname = LuaIdent(f->GetName());
+                if (!seen.insert(fname).second) continue;
                 std::string params, rets;
+                std::set<std::string> pseen = {"self"};
                 for (auto* ff = fn->ChildProperties; ff; ff = ff->Next)
                 {
                     FProperty* p = static_cast<FProperty*>(ff);
@@ -913,9 +919,14 @@ int Kmod_DumpTypes(lua_State* L)
                     bool outp = (p->PropertyFlags & CPF_OutParm) && !(p->PropertyFlags & CPF_ConstParm);
                     if (ret) rets = LuaType(p) + (rets.empty() ? "" : ", " + rets);
                     else if (outp) rets += (rets.empty() ? "" : ", ") + LuaType(p);
-                    else params += ", " + LuaIdent(ff->Name.ToString()) + ": " + LuaType(p);
+                    else
+                    {
+                        std::string pn = LuaIdent(ff->Name.ToString());
+                        for (int k = 2; !pseen.insert(pn).second; k++) pn = LuaIdent(ff->Name.ToString()) + "_" + std::to_string(k);
+                        params += ", " + pn + ": " + LuaType(p);
+                    }
                 }
-                out += "---@field " + LuaIdent(f->GetName()) + " fun(self: " + name + params + ")" + (rets.empty() ? "" : ": " + rets) + "\n";
+                out += "---@field " + fname + " fun(self: " + name + params + ")" + (rets.empty() ? "" : ": " + rets) + "\n";
                 nFunc++;
             }
         }
