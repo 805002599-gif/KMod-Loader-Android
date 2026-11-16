@@ -13,6 +13,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -812,6 +813,134 @@ int Kmod_Search(lua_State* L)
     return 2;
 }
 
+// ---- type declarations for editors (LuaLS / EmmyLua annotations), generated from live reflection ----
+std::string LuaIdent(std::string n)
+{
+    for (char& c : n) if (!(isalnum((unsigned char)c) || c == '_')) c = '_';
+    if (n.empty() || isdigit((unsigned char)n[0])) n = "_" + n;
+    static const char* kw[] = {"and","break","do","else","elseif","end","false","for","function","goto","if","in","local","nil","not","or","repeat","return","then","true","until","while"};
+    for (const char* k : kw) if (n == k) return n + "_";
+    return n;
+}
+
+std::string LuaType(FProperty* p, int depth = 0)
+{
+    if (!p) return "any";
+    if (depth > 3) return "any";
+    switch (TypeOf(p))
+    {
+    case T_Bool: return "boolean";
+    case T_Int8: case T_Byte: case T_Int16: case T_UInt16: case T_Int: case T_UInt32: case T_Int64: case T_UInt64: case T_Float: case T_Double:
+        if (TypeOf(p) == T_Byte) { auto* e = static_cast<FByteProperty*>(p)->Enum; if (e) return LuaIdent(e->GetName()); }
+        return "number";
+    case T_Name: case T_Str: case T_Text: return "string";
+    case T_Object: { auto* c = static_cast<FObjectPropertyBase*>(p)->PropertyClass; return c ? LuaIdent(c->GetName()) : "KObject"; }
+    case T_Class: case T_Weak: case T_Soft: case T_Interface: return "KObject";
+    case T_Struct: { auto* st = static_cast<FStructProperty*>(p)->Struct; return st ? LuaIdent(st->GetName()) : "table"; }
+    case T_Enum: { auto* e = static_cast<FEnumProperty*>(p)->Enum; return e ? LuaIdent(e->GetName()) : "number"; }
+    case T_Array: return LuaType(static_cast<FArrayProperty*>(p)->InnerProperty, depth + 1) + "[]";
+    case T_Set: return LuaType(static_cast<FSetProperty*>(p)->ElementProperty, depth + 1) + "[]";
+    case T_Map: { auto* m = static_cast<FMapProperty*>(p); return "table<" + LuaType(m->KeyProperty, depth + 1) + ", " + LuaType(m->ValueProperty, depth + 1) + ">"; }
+    default: return "any";
+    }
+}
+
+// "/Script/Engine.Actor" -> "Script_Engine";  "/Game/UI/Foo" -> "Game";  "/Engine/..." -> "EngineContent"
+std::string BucketOf(UObject* o)
+{
+    UObject* top = o;
+    for (int i = 0; i < 32 && top->Outer; i++) top = top->Outer;
+    std::string pkg = InSDKUtils::GetNameByIndex(top->Name.GetDisplayIndex());     // "/Script/Engine"
+    std::vector<std::string> seg;
+    { size_t i = 0; while (i < pkg.size()) { size_t j = pkg.find('/', i); if (j == std::string::npos) j = pkg.size(); if (j > i) seg.push_back(pkg.substr(i, j - i)); i = j + 1; } }
+    if (seg.empty()) return "Other";
+    if (seg[0] == "Script" && seg.size() > 1) return "Script_" + LuaIdent(seg[1]);
+    if (seg[0] == "Engine") return "EngineContent";
+    return LuaIdent(seg[0]);
+}
+
+// kmod.dump_types(outDir, {filter,...}) -> files, classes, structs, enums, functions
+int Kmod_DumpTypes(lua_State* L)
+{
+    std::string outDir = luaL_checkstring(L, 1);
+    std::vector<std::string> filters;
+    if (lua_istable(L, 2))
+        for (int i = 1;; i++) { lua_rawgeti(L, 2, i); if (lua_isnil(L, -1)) { lua_pop(L, 1); break; } filters.push_back(Lower(lua_tostring(L, -1))); lua_pop(L, 1); }
+    auto wanted = [&](const std::string& bucket) {
+        if (filters.empty()) return true;
+        std::string b = Lower(bucket);
+        for (auto& f : filters) if (b.find(f) != std::string::npos) return true;
+        return false;
+    };
+    std::map<std::string, std::string> files;
+    std::set<std::string> used;
+    long nClass = 0, nStruct = 0, nEnum = 0, nFunc = 0;
+    UClass* ucls = UClass::StaticClass();
+    UClass* scls = UScriptStruct::StaticClass();
+    UClass* ecls = UEnum::StaticClass();
+    ForEachObject([&](UObject* o) {
+        bool isClass = o->IsA(ucls), isStruct = !isClass && o->IsA(scls), isEnum = !isClass && !isStruct && o->IsA(ecls);
+        if (!isClass && !isStruct && !isEnum) return false;
+        std::string bucket = BucketOf(o);
+        if (!wanted(bucket)) return false;
+        std::string name = LuaIdent(o->GetName());
+        if (!used.insert(name).second) return false;                    // same short name in two packages: first one wins
+        std::string& out = files[bucket];
+        if (isEnum) { out += "---@alias " + name + " integer\n\n"; nEnum++; return false; }
+        UStruct* st = static_cast<UStruct*>(o);
+        out += "---@class " + name;
+        if (st->SuperStruct) { std::string sup = LuaIdent(st->SuperStruct->GetName()); if (sup != name) out += " : " + sup; }
+        else if (isClass) out += " : KObject";
+        out += "\n";
+        for (FField* f = st->ChildProperties; f; f = f->Next)
+        {
+            FProperty* p = static_cast<FProperty*>(f);
+            out += "---@field " + LuaIdent(f->Name.ToString()) + " " + LuaType(p) + "\n";
+        }
+        if (isClass)
+        {
+            UClass* fcls = UFunction::StaticClass();
+            for (UField* f = st->Children; f; f = f->Next)
+            {
+                if (f->Class != fcls) continue;
+                UFunction* fn = static_cast<UFunction*>(f);
+                std::string params, rets;
+                for (auto* ff = fn->ChildProperties; ff; ff = ff->Next)
+                {
+                    FProperty* p = static_cast<FProperty*>(ff);
+                    if (!(p->PropertyFlags & CPF_Parm)) continue;
+                    bool ret = (p->PropertyFlags & CPF_ReturnParm) != 0;
+                    bool outp = (p->PropertyFlags & CPF_OutParm) && !(p->PropertyFlags & CPF_ConstParm);
+                    if (ret) rets = LuaType(p) + (rets.empty() ? "" : ", " + rets);
+                    else if (outp) rets += (rets.empty() ? "" : ", ") + LuaType(p);
+                    else params += ", " + LuaIdent(ff->Name.ToString()) + ": " + LuaType(p);
+                }
+                out += "---@field " + LuaIdent(f->GetName()) + " fun(self: " + name + params + ")" + (rets.empty() ? "" : ": " + rets) + "\n";
+                nFunc++;
+            }
+        }
+        out += "\n";
+        (isClass ? nClass : nStruct)++;
+        return false;
+    });
+    mkdir(outDir.c_str(), 0777);
+    long nFiles = 0;
+    for (auto& kv : files)
+    {
+        std::string path = outDir + "/" + kv.first + ".lua";
+        if (FILE* f = fopen(path.c_str(), "wb"))
+        {
+            std::string head = "---@meta\n-- Generated by kmod `typegen` from the running game's reflection data (" + kv.first + ").\n-- Do not edit; run `typegen` again after a game update.\n\n";
+            fwrite(head.data(), 1, head.size(), f);
+            fwrite(kv.second.data(), 1, kv.second.size(), f);
+            fclose(f);
+            nFiles++;
+        }
+    }
+    lua_pushinteger(L, nFiles); lua_pushinteger(L, nClass); lua_pushinteger(L, nStruct); lua_pushinteger(L, nEnum); lua_pushinteger(L, nFunc);
+    return 5;
+}
+
 // LoadAsset(path) -> UObject | nil, err.   Synchronously loads any asset (pak content included) by object path,
 // e.g. "/Game/UI/Foo/WBP_Foo.WBP_Foo_C" (a Blueprint class) or "/Game/Art/T_Icon.T_Icon". A path without ".Name" gets
 // the package's short name appended. Already-loaded assets are returned as is. Runs on the game thread.
@@ -1435,6 +1564,7 @@ void LuaHost_Init()
     lua_pushcfunction(L, Kmod_Signatures); lua_setfield(L, -2, "signatures");
     lua_pushcfunction(L, Kmod_FuncParams); lua_setfield(L, -2, "func_params");
     lua_pushcfunction(L, Kmod_Search); lua_setfield(L, -2, "search");
+    lua_pushcfunction(L, Kmod_DumpTypes); lua_setfield(L, -2, "dump_types");
 #ifdef KMOD_DEV
     lua_pushcfunction(L, Kmod_DebugCrash); lua_setfield(L, -2, "debug_crash");
 #endif

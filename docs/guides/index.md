@@ -7,6 +7,7 @@ has_toc: false
 
 # 指南
 
+- [编辑器补全]({% link guides/editor-setup.md %})
 - [调试与日志]({% link guides/debugging.md %})
 - [做界面]({% link guides/ui.md %})
 - [示例]({% link guides/examples.md %})

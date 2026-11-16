@@ -22,6 +22,7 @@ parent: 控制台指令
 | `funcs <类名> [过滤词]` | 列出类的函数及其参数、返回值 |
 | `hook <函数路径> [次数]` | 临时钩一个函数，把每次调用的参数打到控制台 |
 | `unhook [函数路径\|all]` / `hooks` | 取消或列出控制台钩子 |
+| `typegen [包名过滤...]` | 生成 LuaLS 类型声明到 `kmod/types/`，见[编辑器补全]({% link guides/editor-setup.md %}) |
 
 ## settings
 

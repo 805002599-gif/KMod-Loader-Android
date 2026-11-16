@@ -29,8 +29,11 @@ nav_order: 8
 - 模组环境：`Mod`、`Log`、`Settings`、`Lang`、`Console`、`require`、`kmod`。
 
 **工具**
-- 控制台指令系统：`help`、`version`、`mods`、`enable`、`disable`、`reload`、`lang`、`settings`、`log`、`find`、`search`、`props`、`funcs`（带参数类型）、`hook` / `unhook` / `hooks`（监听函数调用并打印参数），模组可注册指令。
+- 控制台指令系统：`help`、`version`、`mods`、`enable`、`disable`、`reload`、`lang`、`settings`、`log`、`find`、`search`、`props`、`funcs`（带参数类型）、`hook` / `unhook` / `hooks`（监听函数调用并打印参数）、`typegen`（生成 LuaLS 类型声明），模组可注册指令。
 - 日志：滚动文件日志（保留 5 次运行），原生崩溃处理写入 `FATAL` 回溯。
+
+**数据位置**
+- 所有数据放在共享存储的 `Android/media/<包名>/kmod/`：游戏不需要存储权限，文件管理器和 `adb` 放进去的文件游戏都读得到；旧位置的数据首次启动时自动搬迁。
 
 **已知缺口**
 - 没有 C++ 模组接口；只有 Android，Windows 版未做。
