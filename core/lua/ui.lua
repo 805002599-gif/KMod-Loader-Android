@@ -10,6 +10,7 @@ local function log(...) kmod.log("info", "ui", ...) end
 
 local PATH = {
   click = "WBP_NUI_MasterTextButton_C:BndEvt__Button_0_K2Node_ComponentBoundEvent_0_OnButtonClickedEvent__DelegateSignature",
+  close = "W_CloseButton_C:BndEvt__W_CloseButton_CloseButton_K2Node_ComponentBoundEvent_0_OnButtonClickedEvent__DelegateSignature",
   check = "WBP_NUI_MasterCheckbox_C:BndEvt__WBP_NUI_Checkbox_NUI_CheckBox_K2Node_ComponentBoundEvent_0_OnCheckBoxComponentStateChanged__DelegateSignature",
   slide = "WBP_NUI_MasterSlider_C:BndEvt__WBP_NUI_MasterSlider_Slider_K2Node_ComponentBoundEvent_3_OnFloatValueChangedEvent__DelegateSignature",
   text  = "W_EditableTextBox_C:BndEvt__W_EditableTextBox_EditableTextBox_K2Node_ComponentBoundEvent_1_OnEditableTextBoxCommittedEvent__DelegateSignature",
@@ -244,13 +245,16 @@ function kmod.ui_window(owner, opts)
   local title = create(host, "WBP_NUI_MasterTextBlock_C")
   local tslot = head:AddChild(title)
   pcall(function() tslot:SetSize({ Value = 1.0, SizeRule = 1 }); tslot:SetVerticalAlignment(2) end)
-  local closeBtn = create(host, "WBP_NUI_MasterTextButton_C")
+  -- the game's own close button (the worn "x" icon at the top right of its screens)
+  local closeBtn = create(host, "W_CloseButton_C")
   local cbox = spawn(host, "SizeBox")
-  cbox:SetWidthOverride(100)
+  cbox:SetWidthOverride(84)
+  cbox:SetHeightOverride(84)
   cbox:SetContent(closeBtn)
-  head:AddChild(cbox)
-  later(win, function() title:SetText(opts.title or ""); closeBtn:SetText("X") end)
-  track(win, closeBtn, { kind = "click", cb = function()
+  local cslot = head:AddChild(cbox)
+  pcall(function() cslot:SetVerticalAlignment(2); cslot:SetHorizontalAlignment(2) end)
+  later(win, function() title:SetText(opts.title or "") end)
+  track(win, closeBtn, { kind = "close", cb = function()
     win:hide()
     callMod(owner, "on_close", opts.on_close)
   end })
@@ -318,6 +322,10 @@ function H.click(self)
   local c = rec(self)
   if c and c.kind == "click" and c.win then callMod(c.win.owner, "button", c.cb) end
 end
+function H.close(self)
+  local c = rec(self)
+  if c and c.kind == "close" and c.win then callMod(c.win.owner, "close", c.cb) end
+end
 function H.check(self)
   local c = rec(self)
   if c and c.kind == "check" and not c.win.updating then callMod(c.win.owner, "toggle", c.cb, self:GetIsChecked()) end
@@ -341,6 +349,7 @@ end
 if not kmod._ui_hooked then            -- registered once per Lua state; they dispatch through kmod._uih
   kmod._ui_hooked = true
   RegisterHook(PATH.click, function() end, function(self) kmod._uih.click(self) end)
+  RegisterHook(PATH.close, function() end, function(self) kmod._uih.close(self) end)
   RegisterHook(PATH.check, function() end, function(self) kmod._uih.check(self) end)
   RegisterHook(PATH.slide, function() end, function(self) kmod._uih.slide(self) end)
   RegisterHook(PATH.text,  function() end, function(self) kmod._uih.text(self) end)
