@@ -1,0 +1,651 @@
+-- kmod built-in mod loader (runs as a built-in script, owner ""). Implements the mod pack format v1 (docs/MODPACK_FORMAT.md):
+--   kmod/mods/<id>/{mod.json, main.lua, lang/<tag>.json}   installed packages (read only)
+--   kmod/data/<id>/settings.json                           user settings
+--   kmod/state.json                                        {"enabled":[ids], "language":"auto"}
+--   kmod/inbox/*.kmod                                      zip packages installed automatically
+-- Public (kmod.*): api, json, paths, state helpers, scan_mods, load_mods, install_inbox, set_enabled, settings_get/set,
+-- lang_current, game_language, rec_text, mod_title, setting_label, option_label, t.
+
+local P = kmod.paths
+P.root = P.files .. "/kmod"
+P.data = P.root .. "/data"
+P.inbox = P.root .. "/inbox"
+P.state = P.root .. "/state.json"
+
+local function log(...) kmod.log("info", "loader", ...) end
+local function logw(...) kmod.log("warn", "loader", ...) end
+local function loge(...) kmod.log("error", "loader", ...) end
+
+-- ------------------------------------------------------------------ JSON (tiny)
+local json = {}
+local function skipws(s, i) return s:find("%S", i) or (#s + 1) end
+local parseValue
+local function parseString(s, i)
+  local out, j = {}, i + 1
+  local esc = { n = "\n", t = "\t", r = "\r", b = "\b", f = "\f", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
+  while true do
+    local c = s:sub(j, j)
+    if c == '"' then return table.concat(out), j + 1
+    elseif c == "\\" then
+      local n = s:sub(j + 1, j + 1)
+      if n == "u" then
+        local cp = tonumber(s:sub(j + 2, j + 5), 16)
+        j = j + 6
+        if cp and cp >= 0xD800 and cp < 0xDC00 and s:sub(j, j + 1) == "\\u" then   -- surrogate pair
+          local lo = tonumber(s:sub(j + 2, j + 5), 16)
+          if lo and lo >= 0xDC00 and lo < 0xE000 then cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); j = j + 6 end
+        end
+        out[#out + 1] = utf8.char(cp or 63)
+      else out[#out + 1] = esc[n] or n; j = j + 2 end
+    elseif c == "" then error("unterminated string")
+    else out[#out + 1] = c; j = j + 1 end
+  end
+end
+parseValue = function(s, i)
+  i = skipws(s, i)
+  local c = s:sub(i, i)
+  if c == "{" then
+    local t = {}
+    i = skipws(s, i + 1)
+    if s:sub(i, i) == "}" then return t, i + 1 end
+    while true do
+      i = skipws(s, i)
+      local k; k, i = parseString(s, i)
+      i = skipws(s, i)
+      assert(s:sub(i, i) == ":", "expected ':' at " .. i)
+      local v; v, i = parseValue(s, i + 1)
+      t[k] = v
+      i = skipws(s, i)
+      local d = s:sub(i, i); i = i + 1
+      if d == "}" then return t, i elseif d ~= "," then error("bad object at " .. i) end
+    end
+  elseif c == "[" then
+    local t = {}
+    i = skipws(s, i + 1)
+    if s:sub(i, i) == "]" then return t, i + 1 end
+    while true do
+      local v; v, i = parseValue(s, i)
+      t[#t + 1] = v
+      i = skipws(s, i)
+      local d = s:sub(i, i); i = i + 1
+      if d == "]" then return t, i elseif d ~= "," then error("bad array at " .. i) end
+    end
+  elseif c == '"' then return parseString(s, i)
+  elseif s:sub(i, i + 3) == "true" then return true, i + 4
+  elseif s:sub(i, i + 4) == "false" then return false, i + 5
+  elseif s:sub(i, i + 3) == "null" then return nil, i + 4
+  else
+    local num = s:match("^-?%d+%.?%d*[eE]?[+-]?%d*", i)
+    assert(num and #num > 0, "bad json value at " .. i)
+    return tonumber(num), i + #num
+  end
+end
+function json.decode(s)
+  if s:sub(1, 3) == "\239\187\191" then s = s:sub(4) end   -- BOM
+  local ok, v = pcall(function() return (parseValue(s, 1)) end)
+  if ok then return v end
+  return nil, (tostring(v):gsub("^.-:%d+: ", ""))
+end
+local function enc(v, out)
+  local t = type(v)
+  if t == "table" then
+    if #v > 0 or next(v) == nil then
+      out[#out + 1] = "["
+      for i, x in ipairs(v) do if i > 1 then out[#out + 1] = "," end enc(x, out) end
+      out[#out + 1] = "]"
+    else
+      local keys = {}
+      for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+      table.sort(keys)
+      out[#out + 1] = "{"
+      for i, k in ipairs(keys) do
+        if i > 1 then out[#out + 1] = "," end
+        enc(k, out); out[#out + 1] = ":"; enc(v[k], out)
+      end
+      out[#out + 1] = "}"
+    end
+  elseif t == "string" then out[#out + 1] = '"' .. v:gsub('[%c"\\]', function(c) return string.format("\\u%04x", c:byte()) end) .. '"'
+  elseif t == "number" or t == "boolean" then out[#out + 1] = tostring(v)
+  else out[#out + 1] = "null" end
+end
+function json.encode(v) local out = {}; enc(v, out); return table.concat(out) end
+kmod.json = json
+
+-- ------------------------------------------------------------------ files
+local function readFile(p) local f = io.open(p, "rb"); if not f then return nil end local t = f:read("a"); f:close(); return t end
+local function writeFile(p, t) local f = io.open(p, "wb"); if not f then return false end f:write(t); f:close(); return true end
+local function mkdirs(path)
+  local acc = ""
+  for part in path:gmatch("[^/]+") do
+    acc = acc .. "/" .. part
+    if not kmod.exists(acc) then kmod.mkdir(acc) end
+  end
+end
+kmod.readFile, kmod.writeFile, kmod.mkdirs = readFile, writeFile, mkdirs
+
+-- ------------------------------------------------------------------ state.json
+local state = { enabled = {}, language = "auto" }
+kmod.state = state
+
+local function loadState()
+  local t = json.decode(readFile(P.state) or "{}") or {}
+  state.language = type(t.language) == "string" and t.language or "auto"
+  state.enabled = {}
+  for _, id in ipairs(t.enabled or {}) do state.enabled[id] = true end
+end
+
+local function saveState()
+  local list = {}
+  for id in pairs(state.enabled) do list[#list + 1] = id end
+  table.sort(list)
+  writeFile(P.state, json.encode({ enabled = list, language = state.language }))
+end
+
+function kmod.set_enabled(id, on)
+  loadState()                                           -- always start from what is on disk
+  state.enabled[id] = on and true or nil
+  if on then
+    if kmod.auto_disabled then kmod.auto_disabled[id] = nil end    -- re-enabling restarts the error count
+    if kmod._errCount then kmod._errCount[id] = nil end
+  end
+  saveState()
+end
+
+-- ------------------------------------------------------------------ language + localization
+local TAGS = { "en", "zh-CN", "zh-TW", "ja", "ko", "ru", "de", "fr", "es", "pt", "pl", "it" }
+kmod.language_tags = TAGS
+
+local function normalizeTag(culture)
+  if not culture or culture == "" then return nil end
+  local lower = culture:lower():gsub("_", "-")
+  if lower:sub(1, 2) == "zh" then
+    if lower:find("hant") or lower:find("tw") or lower:find("hk") or lower:find("mo") then return "zh-TW" end
+    return "zh-CN"
+  end
+  local base = lower:match("^(%a+)")
+  for _, t in ipairs(TAGS) do if t:lower() == base then return t end end
+  return nil
+end
+
+function kmod.game_language()
+  local ok, culture = pcall(function()
+    local lib = StaticFindObject("/Script/Engine.Default__KismetInternationalizationLibrary")
+    return lib:GetCurrentLanguage()
+  end)
+  return ok and normalizeTag(culture) or nil
+end
+
+function kmod.lang_current()
+  if state.language ~= "auto" then return state.language end
+  return kmod.game_language() or "en"
+end
+
+local function langChain(tag)
+  local chain = { tag }
+  local base = tag:match("^(%a+)-")
+  if base then chain[#chain + 1] = base end
+  if tag ~= "en" then chain[#chain + 1] = "en" end
+  return chain
+end
+
+local function langTable(rec, tag)
+  rec._lang = rec._lang or {}
+  if rec._lang[tag] == nil then
+    local txt = readFile(rec.dir .. "/lang/" .. tag .. ".json")
+    rec._lang[tag] = txt and json.decode(txt) or false
+  end
+  return rec._lang[tag]
+end
+
+function kmod.rec_text(rec, key)                      -- translated text for a mod key, or nil
+  for _, tag in ipairs(langChain(kmod.lang_current())) do
+    local t = langTable(rec, tag)
+    if t and t[key] ~= nil then return tostring(t[key]) end
+  end
+  return nil
+end
+
+local function interpolate(s, vars)
+  return (s:gsub("{([%w_]+)}", function(k) local v = vars and vars[k]; if v ~= nil then return tostring(v) end return "{" .. k .. "}" end))
+end
+
+function kmod.mod_title(rec) return kmod.rec_text(rec, "name") or rec.name end
+function kmod.mod_description(rec) return kmod.rec_text(rec, "description") or rec.description or "" end
+function kmod.setting_label(rec, s) return kmod.rec_text(rec, "settings." .. s.id .. ".label") or s.label or s.id end
+function kmod.option_label(rec, s, value) return kmod.rec_text(rec, "settings." .. s.id .. ".options." .. tostring(value)) or tostring(value) end
+
+-- strings of the manager UI itself
+local UI = {
+  en = { mods = "Mods", version = "Version", enabled = "Enabled", language = "Language", status = "Status",
+         no_mods = "No mods found", no_mods_hint = "Put folders in kmod/mods or .kmod files in kmod/inbox", auto = "Auto (game language)" },
+  ["zh-CN"] = { mods = "模组", version = "版本", enabled = "启用", language = "语言", status = "状态",
+                no_mods = "未找到模组", no_mods_hint = "把文件夹放进 kmod/mods，或把 .kmod 放进 kmod/inbox", auto = "自动（跟随游戏）" },
+  ["zh-TW"] = { mods = "模組", version = "版本", enabled = "啟用", language = "語言", status = "狀態",
+                no_mods = "找不到模組", no_mods_hint = "把資料夾放進 kmod/mods，或把 .kmod 放進 kmod/inbox", auto = "自動（跟隨遊戲）" },
+}
+function kmod.t(key)
+  for _, tag in ipairs(langChain(kmod.lang_current())) do
+    local t = UI[tag]
+    if t and t[key] then return t[key] end
+  end
+  return key
+end
+kmod.language_names = { auto = "auto", en = "English", ["zh-CN"] = "简体中文", ["zh-TW"] = "繁體中文", ja = "日本語", ko = "한국어",
+                       ru = "Русский", de = "Deutsch", fr = "Français", es = "Español", pt = "Português", pl = "Polski", it = "Italiano" }
+
+function kmod.set_language(tag)
+  loadState()
+  state.language = tag
+  saveState()
+  kmod._notify_language()
+end
+
+-- ------------------------------------------------------------------ settings values
+local function loadValues(rec)
+  rec.values = json.decode(readFile(P.data .. "/" .. rec.id .. "/settings.json") or "{}") or {}
+  rec.defaults = {}
+  rec.settingById = {}
+  for _, s in ipairs(rec.settings) do rec.defaults[s.id] = s.default; rec.settingById[s.id] = s end
+end
+
+function kmod.settings_get(rec, id)
+  local v = rec.values[id]
+  local s = rec.settingById[id]
+  if v ~= nil and s and s.type == "choice" then
+    local ok = false
+    for _, o in ipairs(s.options or {}) do if o == v then ok = true end end
+    if not ok then v = nil end                          -- stored value is not an option any more -> default
+  end
+  if v ~= nil and s then                                -- hand-edited / stale values of the wrong type -> default
+    local want = ({ bool = "boolean", number = "number", string = "string" })[s.type]
+    if want and type(v) ~= want then v = nil end
+  end
+  if v == nil then v = rec.defaults[id] end
+  if v == nil and s and s.type == "string" then v = "" end
+  return v
+end
+
+function kmod.settings_set(rec, id, v, silent)
+  -- the UI may hold a record from before the last reload; the live one (with the mod's handlers) is looked up by id
+  local live = (kmod._recById and kmod._recById[rec.id]) or rec
+  live.values[id] = v
+  if rec ~= live then rec.values[id] = v end
+  mkdirs(P.data .. "/" .. rec.id)
+  writeFile(P.data .. "/" .. rec.id .. "/settings.json", json.encode(live.values))
+  if not silent then
+    for _, fn in ipairs(live._handlers or {}) do
+      local ok, err = pcall(fn, id, v)
+      if not ok then loge(rec.id .. " Settings.on_change error: " .. tostring(err)) end
+    end
+  end
+end
+
+-- ------------------------------------------------------------------ manifest + scanning
+local ID_PAT = "^[a-z0-9_]+$"
+kmod._status = kmod._status or {}                         -- id -> last status message of the last load
+
+-- Dependency specs: "id", "id>=1.2.0", "id>=1.0.0,<2.0.0". "kmod" is the loader itself.
+local function parseVer(s)
+  local a, b, c = tostring(s):match("^%s*v?(%d+)%.?(%d*)%.?(%d*)")
+  if not a then return nil end
+  return { tonumber(a), tonumber(b) or 0, tonumber(c) or 0 }
+end
+local function cmpVer(x, y)
+  for i = 1, 3 do if x[i] ~= y[i] then return x[i] < y[i] and -1 or 1 end end
+  return 0
+end
+local function parseDep(spec)
+  if type(spec) ~= "string" then return nil, "not a string" end
+  local id, rest = spec:match("^%s*([a-z0-9_]+)%s*(.-)%s*$")
+  if not id then return nil, "bad id" end
+  local cons = {}
+  if rest ~= "" then
+    for part in rest:gmatch("[^,]+") do
+      local op, v = part:match("^%s*([<>=]=?)%s*(.-)%s*$")
+      local pv = v and parseVer(v)
+      if not op or not pv or not (op == ">=" or op == ">" or op == "<=" or op == "<" or op == "=" or op == "==") then
+        return nil, "bad version condition '" .. part:match("^%s*(.-)%s*$") .. "'"
+      end
+      cons[#cons + 1] = { op = op, ver = pv, text = op .. v }
+    end
+  end
+  return id, cons
+end
+-- returns ok, description of the first failing condition
+local function versionOk(have, cons)
+  local hv = parseVer(have)
+  for _, c in ipairs(cons) do
+    if not hv then return false, c.text end
+    local r = cmpVer(hv, c.ver)
+    local ok = (c.op == ">=" and r >= 0) or (c.op == ">" and r > 0) or (c.op == "<=" and r <= 0) or (c.op == "<" and r < 0) or ((c.op == "=" or c.op == "==") and r == 0)
+    if not ok then return false, c.text end
+  end
+  return true
+end
+kmod.version_satisfies = function(have, spec)
+  local _, cons = parseDep("x" .. (spec or ""))
+  if type(cons) ~= "table" then return nil, cons end
+  return versionOk(have, cons)
+end
+
+-- Reserved dependency ids: the loader and the game itself. Unknown game version => the condition is skipped with a warning.
+local function reservedVersion(id)
+  if id == "kmod" then return kmod.version end
+  if id == "kards" then return kmod.game end
+end
+local RESERVED = { kmod = true, kards = true }
+
+-- The game version comes from GeneralProjectSettings.ProjectVersion ("Kards 1.61.27596.APK"); only major.minor is used ("1.61").
+function kmod.detect_game_version()
+  local ok, v = pcall(function()
+    local g = StaticFindObject("/Script/EngineSettings.Default__GeneralProjectSettings")
+    return g and g.ProjectVersion
+  end)
+  if not ok or type(v) ~= "string" then return nil end
+  local full = v:match("%d+%.%d+%.%d+") or v:match("%d+%.%d+")
+  local short = v:match("(%d+%.%d+)")
+  if not short then return nil end
+  kmod.game_version, kmod.game = full, short
+  return short
+end
+
+local function inspect(folder)
+  local rec = { folder = folder, dir = P.mods .. "/" .. folder, errors = {}, warnings = {} }
+  local def = {}
+  local txt = readFile(rec.dir .. "/mod.json")
+  if not txt then rec.errors[#rec.errors + 1] = "mod.json missing"
+  else
+    local d, perr = json.decode(txt)
+    if type(d) ~= "table" then rec.errors[#rec.errors + 1] = "bad mod.json (" .. tostring(perr) .. ")" else def = d end
+  end
+  rec.def = def
+  rec.id = def.id or folder
+  if def.id == nil then rec.warnings[#rec.warnings + 1] = "mod.json has no id (using folder name)" end
+  if type(rec.id) ~= "string" or not rec.id:match(ID_PAT) then rec.errors[#rec.errors + 1] = "invalid id '" .. tostring(rec.id) .. "'"
+  elseif rec.id ~= folder then rec.errors[#rec.errors + 1] = "id '" .. rec.id .. "' does not match folder '" .. folder .. "'" end
+  if def.format == nil then rec.warnings[#rec.warnings + 1] = "no format field (assuming 1)"
+  elseif def.format ~= 1 then rec.errors[#rec.errors + 1] = "unsupported format " .. tostring(def.format) end
+  rec.version = def.version and tostring(def.version) or ""
+  if def.version == nil then rec.warnings[#rec.warnings + 1] = "no version" end
+  rec.name = def.name or rec.id
+  rec.author, rec.description = def.author or "", def.description or ""
+  if type(def.api) == "number" and def.api > kmod.api then rec.errors[#rec.errors + 1] = "needs loader API " .. tostring(def.api) .. " (have " .. kmod.api .. ")" end
+  rec.depends, rec.depCons = {}, {}                       -- depends = mod ids to load first; depCons[id] = version conditions
+  if def.depends ~= nil and type(def.depends) ~= "table" then rec.errors[#rec.errors + 1] = "depends must be a list" end
+  for _, spec in ipairs(type(def.depends) == "table" and def.depends or {}) do
+    local id, cons = parseDep(spec)
+    if not id then rec.errors[#rec.errors + 1] = "bad dependency " .. tostring(spec) .. " (" .. tostring(cons) .. ")"
+    elseif RESERVED[id] then
+      local have = reservedVersion(id)
+      if not have then
+        if #cons > 0 then rec.warnings[#rec.warnings + 1] = id .. " version unknown, condition ignored" end
+      else
+        local ok, bad = versionOk(have, cons)
+        if not ok then rec.errors[#rec.errors + 1] = "requires " .. id .. bad .. " (have " .. have .. ")" end
+      end
+    else
+      rec.depends[#rec.depends + 1] = id
+      rec.depCons[id] = cons
+    end
+  end
+  rec.settings = type(def.settings) == "table" and def.settings or {}
+  if kmod.exists(rec.dir .. "/main.lua") then rec.entry = rec.dir .. "/main.lua"
+  elseif kmod.exists(rec.dir .. "/Scripts/main.lua") then rec.entry = rec.dir .. "/Scripts/main.lua"; rec.warnings[#rec.warnings + 1] = "legacy Scripts/main.lua"
+  else rec.errors[#rec.errors + 1] = "main.lua missing" end
+  rec.enabled = state.enabled[rec.id] == true
+  loadValues(rec)
+  return rec
+end
+
+function kmod.scan_mods()
+  local list = {}
+  for _, e in ipairs(kmod.listdir(P.mods)) do
+    if e.dir then
+      local rec = inspect(e.name)
+      rec.status = kmod._status[rec.id]
+      if #rec.errors > 0 then rec.status = "error: " .. rec.errors[1]
+      elseif not rec.enabled then rec.status = (kmod.auto_disabled and kmod.auto_disabled[rec.id]) or "disabled"
+      elseif not rec.status then rec.status = "not loaded" end
+      list[#list + 1] = rec
+    end
+  end
+  table.sort(list, function(a, b) return a.id < b.id end)
+  return list
+end
+
+-- rescan the folders (UI opens, new package copied in) but keep the runtime parts of records that are already loaded
+-- (handlers, values, language cache) so Settings.on_change keeps working
+function kmod.refresh_mods()
+  local old = {}
+  for _, rec in ipairs(kmod.mods or {}) do old[rec.id] = rec end
+  local list = kmod.scan_mods()
+  for _, rec in ipairs(list) do
+    local o = old[rec.id]
+    if o then rec._handlers, rec._langHandlers, rec.values, rec._lang = o._handlers, o._langHandlers, o.values, o._lang end
+  end
+  kmod.mods = list
+  local byId = {}
+  for _, rec in ipairs(list) do byId[rec.id] = rec end
+  kmod._recById = byId
+  return list
+end
+
+-- ------------------------------------------------------------------ migration from the pre-v1 layout
+local function migrate()
+  local changed = false
+  for _, e in ipairs(kmod.listdir(P.mods)) do
+    if e.dir then
+      local dir = P.mods .. "/" .. e.name
+      local id = e.name
+      local mj = json.decode(readFile(dir .. "/mod.json") or "{}")
+      if type(mj) == "table" and type(mj.id) == "string" then id = mj.id end
+      if kmod.exists(dir .. "/enabled.txt") then
+        state.enabled[id] = true
+        os.remove(dir .. "/enabled.txt")
+        changed = true
+        log("migrated enabled.txt of " .. id)
+      end
+      if kmod.exists(dir .. "/settings.json") then
+        local dst = P.data .. "/" .. id .. "/settings.json"
+        if not kmod.exists(dst) then
+          mkdirs(P.data .. "/" .. id)
+          writeFile(dst, readFile(dir .. "/settings.json") or "{}")
+          os.remove(dir .. "/settings.json")
+          log("migrated settings.json of " .. id)
+        end
+      end
+    end
+  end
+  if changed then saveState() end
+end
+
+-- ------------------------------------------------------------------ .kmod installation
+local function installOne(zipPath)
+  local tmp = P.inbox .. "/.tmp"
+  kmod.rmtree(tmp); mkdirs(tmp)
+  local ok, err = kmod.unzip(zipPath, tmp)
+  if not ok then kmod.rmtree(tmp); return false, "unzip failed: " .. tostring(err) end
+  local def, perr = json.decode(readFile(tmp .. "/mod.json") or "")
+  local function fail(msg) kmod.rmtree(tmp); return false, msg end
+  if type(def) ~= "table" then return fail("mod.json missing or invalid " .. tostring(perr or "")) end
+  if def.format ~= 1 then return fail("format must be 1") end
+  if type(def.id) ~= "string" or not def.id:match(ID_PAT) then return fail("invalid or missing id") end
+  if def.version == nil then return fail("version is required") end
+  if def.depends ~= nil and type(def.depends) ~= "table" then return fail("depends must be a list") end
+  for _, spec in ipairs(def.depends or {}) do
+    local id, cons = parseDep(spec)
+    if not id then return fail("bad dependency " .. tostring(spec) .. " (" .. tostring(cons) .. ")") end
+    local have = RESERVED[id] and reservedVersion(id)
+    if have then
+      local ok, bad = versionOk(have, cons)
+      if not ok then return fail("requires " .. id .. bad .. " (have " .. have .. ")") end
+    end
+  end
+  if not kmod.exists(tmp .. "/main.lua") then return fail("main.lua missing") end
+  local target = P.mods .. "/" .. def.id
+  if kmod.exists(target) then kmod.rmtree(target) end   -- upgrade = replace the package; data/ and state.json are untouched
+  if not os.rename(tmp, target) then return fail("could not move package into mods/") end
+  return true, def.id
+end
+
+function kmod.install_inbox()
+  local n = 0
+  for _, e in ipairs(kmod.listdir(P.inbox)) do
+    if not e.dir and e.name:lower():match("%.kmod$") then
+      local path = P.inbox .. "/" .. e.name
+      local ok, res = installOne(path)
+      if ok then os.remove(path); n = n + 1; log("installed " .. res .. " from " .. e.name)
+      else
+        mkdirs(P.inbox .. "/failed")
+        os.rename(path, P.inbox .. "/failed/" .. e.name)
+        writeFile(P.inbox .. "/failed/" .. e.name .. ".txt", tostring(res))
+        logw("install failed: " .. e.name .. ": " .. tostring(res))
+      end
+    end
+  end
+  return n
+end
+
+local lastLang = nil
+
+-- ------------------------------------------------------------------ running mods
+local function makeRequire(rec, env)
+  local loaded = {}
+  return function(name)
+    if loaded[name] ~= nil then return loaded[name] end
+    local rel = name:gsub("%.", "/")
+    local path = rec.dir .. "/" .. rel .. ".lua"
+    if not kmod.exists(path) then path = rec.dir .. "/" .. rel .. "/init.lua" end
+    local chunk, err = loadfile(path, "t", env)
+    if not chunk then error("module '" .. name .. "' not found in mod " .. rec.id .. ": " .. tostring(err), 2) end
+    local r = chunk(name)
+    if r == nil then r = true end
+    loaded[name] = r
+    return r
+  end
+end
+
+local function loadOne(rec)
+  rec._handlers, rec._langHandlers = {}, {}
+  local env = setmetatable({}, { __index = _G })
+  for k, v in pairs(kmod.mod_api(rec.id)) do env[k] = v end          -- owner-tagged RegisterHook/ExecuteWithDelay/...
+  env.print = function(...) kmod.log("info", rec.id, ...) end
+  env.Log = {
+    debug = function(...) kmod.log("debug", rec.id, ...) end,
+    info = function(...) kmod.log("info", rec.id, ...) end,
+    warn = function(...) kmod.log("warn", rec.id, ...) end,
+    error = function(...) kmod.log("error", rec.id, ...) end,
+  }
+  env.Mod = { id = rec.id, name = rec.name, version = rec.version, dir = rec.dir, path = function(rel) return rec.dir .. "/" .. rel end }
+  env.Settings = {
+    get = function(id) return kmod.settings_get(rec, id) end,
+    set = function(id, v) kmod.settings_set(rec, id, v) end,
+    on_change = function(fn) rec._handlers[#rec._handlers + 1] = fn end,
+  }
+  env.Lang = {
+    t = function(key, vars)
+      local s = kmod.rec_text(rec, key)
+      return s and interpolate(s, vars) or key
+    end,
+    current = kmod.lang_current,
+    on_change = function(fn) rec._langHandlers[#rec._langHandlers + 1] = fn end,
+  }
+  if kmod.console_api then env.Console = kmod.console_api(rec) end
+  env.require = makeRequire(rec, env)
+  local chunk, err = loadfile(rec.entry, "t", env)
+  if not chunk then rec.status = "load error: " .. tostring(err); kmod._status[rec.id] = rec.status; loge(rec.id .. ": " .. rec.status); return end
+  local ok, e = xpcall(chunk, debug.traceback)
+  if ok then rec.status = "loaded" else rec.status = "error: " .. tostring(e):match("^[^\n]*") ; loge(rec.id .. " main.lua failed: " .. tostring(e)) end
+  kmod._status[rec.id] = rec.status
+  if ok then log("loaded " .. rec.id .. " v" .. rec.version) end
+end
+
+function kmod.load_mods()
+  loadState()
+  mkdirs(P.data); mkdirs(P.inbox)
+  migrate()
+  kmod.install_inbox()
+  kmod._status = {}
+  if kmod.console_clear_mods then kmod.console_clear_mods() end     -- mod commands are re-registered by the mods that load below
+  if not kmod.game then
+    if kmod.detect_game_version() then log("game version " .. tostring(kmod.game_version) .. " (kards " .. kmod.game .. ")")
+    else logw("game version unknown; kards>= conditions are ignored") end
+  end
+  local mods = kmod.scan_mods()
+  kmod.mods = mods
+  local byId = {}
+  for _, rec in ipairs(mods) do byId[rec.id] = rec end
+  kmod._recById = byId
+
+  local order, mark = {}, {}
+  local function visit(rec)
+    if mark[rec.id] == "done" then return rec.ok end
+    if mark[rec.id] == "visiting" then rec.status = "dependency cycle"; return false end
+    mark[rec.id] = "visiting"
+    for _, dep in ipairs(rec.depends) do
+      local d = byId[dep]
+      if not d or #d.errors > 0 or not d.enabled then
+        rec.status = "missing dependency: " .. tostring(dep); mark[rec.id] = "done"; rec.ok = false; kmod._status[rec.id] = rec.status; return false
+      end
+      local vok, bad = versionOk(d.version, rec.depCons[dep] or {})
+      if not vok then
+        rec.status = "dependency version: " .. dep .. bad .. " required (have " .. (d.version ~= "" and d.version or "?") .. ")"
+        mark[rec.id] = "done"; rec.ok = false; kmod._status[rec.id] = rec.status; return false
+      end
+      if not visit(d) then
+        rec.status = "dependency failed: " .. tostring(dep); mark[rec.id] = "done"; rec.ok = false; kmod._status[rec.id] = rec.status; return false
+      end
+    end
+    mark[rec.id] = "done"; rec.ok = true
+    order[#order + 1] = rec
+    return true
+  end
+  for _, rec in ipairs(mods) do
+    for _, w in ipairs(rec.warnings) do logw(rec.id .. ": " .. w) end
+    for _, e in ipairs(rec.errors) do logw(rec.id .. ": " .. e) end
+    if rec.enabled and #rec.errors == 0 then
+      if not visit(rec) and rec.status then logw(rec.id .. ": " .. rec.status) end
+    end
+  end
+  for _, rec in ipairs(order) do loadOne(rec) end
+  log(string.format("%d package(s), %d loaded", #mods, #order))
+  lastLang = kmod.lang_current()
+end
+
+-- ------------------------------------------------------------------ auto-disable on repeated runtime errors
+-- Called by the core for every error raised inside a mod's hook / timer / new-object callback.
+-- A mod that raises MAX_ERRORS errors in one session is disabled (persisted) and the mods are reloaded.
+local MAX_ERRORS = 10
+kmod.max_errors = MAX_ERRORS
+kmod._errCount = kmod._errCount or {}
+kmod.auto_disabled = kmod.auto_disabled or {}      -- id -> reason, this session
+function kmod._mod_error(id, msg)
+  if kmod.auto_disabled[id] then return end
+  local n = (kmod._errCount[id] or 0) + 1
+  kmod._errCount[id] = n
+  if n < MAX_ERRORS then return end
+  local reason = "disabled after " .. n .. " script errors: " .. tostring(msg):match("^[^\n]*")
+  kmod.auto_disabled[id] = reason
+  loge(id .. ": " .. reason)
+  kmod.set_enabled(id, false)
+  ExecuteWithDelay(100, function() kmod.reload_mods() end)   -- not inside the failing callback
+end
+
+-- ------------------------------------------------------------------ language change notifications
+function kmod._notify_language()
+  local cur = kmod.lang_current()
+  if cur == lastLang then return end
+  lastLang = cur
+  for _, rec in ipairs(kmod.mods or {}) do
+    for _, fn in ipairs(rec._langHandlers or {}) do
+      local ok, err = pcall(fn, cur)
+      if not ok then loge(rec.id .. " Lang.on_change error: " .. tostring(err)) end
+    end
+  end
+  if kmod.on_language_changed then pcall(kmod.on_language_changed, cur) end
+end
+
+if not kmod._lang_watch then                              -- poll the game language (cheap) so Lang.on_change also fires for "auto"
+  kmod._lang_watch = true
+  LoopAsync(2000, function() kmod._notify_language(); return false end)
+end

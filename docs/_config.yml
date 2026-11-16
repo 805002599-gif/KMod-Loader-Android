@@ -1,0 +1,5 @@
+title: kmod loader
+description: A Lua mod loader for KARDS (Android; Windows planned)
+theme: jekyll-theme-minimal
+markdown: kramdown
+lang: zh-CN

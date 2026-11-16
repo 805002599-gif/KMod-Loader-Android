@@ -1,0 +1,17 @@
+# build output, game files and keys are never committed
+build/
+build-*/
+stage-*/
+gen/
+*.apk
+*.dex
+*.idsig
+*.so
+*.keystore
+*.jks
+dump/
+x/
+out/
+*.png
+*.log
+*.err
