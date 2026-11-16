@@ -102,6 +102,21 @@ end
 
 local function section(title) header(title, "sec"); return ui.scroll end
 
+-- A mod's description: its own full-width, wrapping text block in the same font as the settings labels. (As the label of a
+-- settings row it was squeezed into the narrow label column and shrunk.)
+local function description(text)
+  if not ui.style.descFont then
+    local ok, f = pcall(function() return create("W_OptionsEntryBase_C").OptionNameText.Font end)   -- the game's own label font
+    ui.style.descFont = (ok and f) or ui.style.sec.font
+  end
+  local tb = gp:SpawnObject(textCls, ui.layout.WidgetTree)
+  local tslot = ui.scroll:AddChild(tb)
+  tslot:SetPadding({ Left = 0, Top = 0, Right = 0, Bottom = 12 })
+  tb:SetFont(ui.style.descFont); tb:SetColorAndOpacity(ui.style.sec.color)
+  pcall(function() tb:SetAutoWrapText(true) end)
+  tb:SetText(text)
+end
+
 -- a settings row: label on the left, optional control in the content slot (the game's W_OptionsEntryBase_C, standalone = safe)
 local function row(box, label, control)
   local r = create("W_OptionsEntryBase_C")
@@ -186,7 +201,7 @@ local function refresh()
   for _, rec in ipairs(mods) do
     local box = section(kmod.mod_title(rec))
     local desc = kmod.mod_description(rec)
-    if desc ~= "" then row(box, desc) end
+    if desc ~= "" then description(desc) end
     local vt = create("WBP_NUI_MasterTextBlock_C")
     row(box, kmod.t("version"), vt)
     pending[#pending + 1] = function() vt:SetText(rec.version ~= "" and rec.version or "-") end
