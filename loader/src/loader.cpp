@@ -127,9 +127,14 @@ extern "C" __attribute__((visibility("default"))) void KMod_OverlayAppend(const 
 }
 #endif
 
+// the VM, for the core's Java calls (HTTP): kept in every build
+static JavaVM* g_javaVm = nullptr;
+extern "C" __attribute__((visibility("default"))) JavaVM* KMod_GetJavaVM() { return g_javaVm; }
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*)
 {
     Describe("JNI_OnLoad");
+    g_javaVm = vm;
 #ifdef KMOD_DEV
     g_vm = vm;
     JNIEnv* env = nullptr;

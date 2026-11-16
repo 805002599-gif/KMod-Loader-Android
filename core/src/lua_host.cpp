@@ -32,7 +32,9 @@ extern "C" {
 #include "modmanager_lua.h"   // generated from lua/modmanager.lua (kModManagerLua)
 #include "commands_lua.h"       // generated from lua/commands.lua (kCommandsLua)
 #include "json_lua.h"           // generated from lua/json.lua (kJsonLua)
+#include "ui_lua.h"             // generated from lua/ui.lua (kUiLua)
 #include "lua_worker.h"
+#include "http.h"
 #include "kmod_boot.h"
 
 using namespace SDK;
@@ -229,7 +231,13 @@ bool ObjAlive(const LuaObj* o)
 {
     if (!o || !o->p || o->idx < 0) return false;
     FUObjectItem* it = ObjRef::ItemAt(o->idx);
-    return it && it->Object == o->p && SlotSerial(it) == o->serial && ObjRef::ItemUsable(it);
+    if (!it || it->Object != o->p || !ObjRef::ItemUsable(it)) return false;
+    // The serial number is handed out lazily (the first time anything makes a weak pointer to the object), so a handle made
+    // before that has 0. Only a handle that HAS a serial can tell that the slot was reused for another object.
+    int32_t now = SlotSerial(it);
+    if (o->serial != 0 && now != o->serial) return false;
+    if (o->serial == 0 && now != 0) const_cast<LuaObj*>(o)->serial = now;
+    return true;
 }
 
 LuaObj* ToLuaObj(lua_State* L, int i) { return static_cast<LuaObj*>(luaL_testudata(L, i, MT_OBJECT)); }
@@ -1660,6 +1668,7 @@ void LuaHost_Init()
             [](lua_State* S, int na, int nr, const char* what, const std::string& owner) { return PCall(S, na, nr, what, owner); },
             [](lua_State* S, const std::string& owner, const std::string& msg) { ReportModError(S, owner, msg); }};
         Worker_Init(L, wh, kJsonLua);
+        Http_Init(wh);
         if (luaL_loadbuffer(L, kJsonLua, strlen(kJsonLua), "=json") == LUA_OK && lua_pcall(L, 0, 1, 0) == LUA_OK)
         {
             lua_getglobal(L, "kmod");
@@ -1670,6 +1679,7 @@ void LuaHost_Init()
     }
     lua_getglobal(L, "kmod");
     lua_pushcfunction(L, Worker_Create); lua_setfield(L, -2, "worker");
+    lua_pushcfunction(L, Http_Request); lua_setfield(L, -2, "http_request");
     lua_pushcfunction(L, Boot_Info); lua_setfield(L, -2, "boot_info");
     lua_pushcfunction(L, Boot_SafeOff); lua_setfield(L, -2, "safe_off");
     lua_pushcfunction(L, Pak_Status); lua_setfield(L, -2, "pak_status");
@@ -1713,7 +1723,7 @@ void LuaHost_Init()
     // <dev>/modmanager.lua override the embedded copies.
     {
         struct { const char* file; const char* embedded; const char* chunk; } builtins[] = {
-            {"modloader.lua", kModLoaderLua, "=modloader"}, {"commands.lua", kCommandsLua, "=commands"}, {"modmanager.lua", kModManagerLua, "=modmanager"}};
+            {"modloader.lua", kModLoaderLua, "=modloader"}, {"commands.lua", kCommandsLua, "=commands"}, {"ui.lua", kUiLua, "=ui"}, {"modmanager.lua", kModManagerLua, "=modmanager"}};
         for (auto& b : builtins)
         {
             std::string code = b.embedded;
@@ -1743,6 +1753,7 @@ void LuaHost_ReloadMods()
     // drop everything registered by user mods (owner != ""); built-in scripts (owner "") stay
     if (!L_) return;
     Worker_CloseUser(L_);
+    Http_CancelUser(L_);
     for (auto& kv : g_hooks)
     {
         auto& v = kv.second;
@@ -1841,6 +1852,7 @@ void LuaHost_Tick(double now)
     }
 
     Worker_Pump(L_);
+    Http_Pump(L_);
 
     if (!g_anyFastWatch) ScanNewObjects();        // with a fast watch the scan runs from LuaHost_FastTick instead
 

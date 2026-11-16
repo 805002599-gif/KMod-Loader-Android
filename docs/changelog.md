@@ -31,6 +31,9 @@ nav_order: 8
 - **崩溃保护**：记录崩溃时正在运行的模组或 pak，下次启动隔离它；原因不明的连续崩溃进入安全模式（见[崩溃保护]({% link guide/safe-mode.md %})）。
 - pak 由核心在引擎就绪时挂载，比之前早约 5 秒。
 - `Events`（模组间事件总线）、`Store`（模组的持久化存储）、`Mod.data_dir`。
+- **自定义界面**：[`UI`]({% link lua-api/mod-env/ui.md %})（`UI.window`、`toast`），用游戏自己的控件搭窗口。
+- **网络**：[`Http`]({% link lua-api/mod-env/http.md %})（`get`、`post`、`request`），需要 `mod.json` 声明 `permissions: ["network"]`。
+- **心跳**：用引擎定时器驱动 tick，游戏静止时定时器不再停摆（之前在静止画面上 `ExecuteWithDelay(300)` 可能拖到几十秒）。
 - UObject 句柄现在也比较槽位序号，对象被销毁、槽位被复用后旧句柄不会指向新对象。
 
 **Lua API**

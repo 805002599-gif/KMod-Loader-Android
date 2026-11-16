@@ -278,6 +278,12 @@ local function inspect(folder)
   rec.name = def.name or rec.id
   rec.author, rec.description = def.author or "", def.description or ""
   if type(def.api) == "number" and def.api > kmod.api then rec.errors[#rec.errors + 1] = "needs loader API " .. tostring(def.api) .. " (have " .. kmod.api .. ")" end
+  rec.permissions = {}                                    -- declared in mod.json "permissions": ["network"]; shown to the user, see docs
+  if def.permissions ~= nil and type(def.permissions) ~= "table" then rec.errors[#rec.errors + 1] = "permissions must be a list" end
+  for _, p in ipairs(type(def.permissions) == "table" and def.permissions or {}) do
+    if p == "network" then rec.permissions[p] = true
+    else rec.warnings[#rec.warnings + 1] = "unknown permission '" .. tostring(p) .. "' ignored" end
+  end
   rec.depends, rec.depCons = {}, {}                       -- depends = mod ids to load first; depCons[id] = version conditions
   if def.depends ~= nil and type(def.depends) ~= "table" then rec.errors[#rec.errors + 1] = "depends must be a list" end
   for _, spec in ipairs(type(def.depends) == "table" and def.depends or {}) do
@@ -448,6 +454,37 @@ local function loadOne(rec)
     assert(type(file) == "string" and not file:find("..", 1, true) and not file:find("^[/\\]"), "Worker: the script must be a relative path inside the mod")
     return kmod.worker(rec.id, rec.dir .. "/" .. file)
   end
+  if kmod.ui_api then env.UI = kmod.ui_api(rec) end            -- UI.window{...}, UI.toast(text)
+  -- Http: needs "permissions": ["network"] in mod.json. Http.get(url [, opts], cb), Http.post(url, body [, opts], cb), Http.request(opts, cb), Http.json(resp)
+  local function httpRequest(opts, cb)
+    if not rec.permissions.network then error('Http: this mod must declare "permissions": ["network"] in mod.json', 3) end
+    if type(opts) ~= "table" or type(cb) ~= "function" then error("Http: expected (options, callback)", 3) end
+    return kmod.http_request(rec.id, opts, cb)
+  end
+  local function withUrl(url, method, opts)
+    local o = {}
+    for k, v in pairs(opts or {}) do o[k] = v end
+    o.url, o.method = url, method
+    return o
+  end
+  env.Http = {
+    request = httpRequest,
+    get = function(url, opts, cb)
+      if type(opts) == "function" then cb, opts = opts, nil end
+      return httpRequest(withUrl(url, "GET", opts), cb)
+    end,
+    post = function(url, body, opts, cb)
+      if type(opts) == "function" then cb, opts = opts, nil end
+      local o = withUrl(url, "POST", opts)
+      if type(body) == "table" then
+        o.body = json.encode(body)
+        o.headers = o.headers or {}
+        if not o.headers["Content-Type"] then o.headers["Content-Type"] = "application/json" end
+      else o.body = body end
+      return httpRequest(o, cb)
+    end,
+    json = function(resp) return resp and resp.body and json.decode(resp.body) or nil end,
+  }
   -- Events: a bus shared by all mods (cleared when mods reload). Events.on(name, fn) -> handle; Events.emit(name, ...); Events.off(handle)
   kmod._events = kmod._events or {}
   env.Events = {
@@ -522,6 +559,7 @@ function kmod.load_mods()
   kmod.install_inbox()
   kmod._status = {}
   kmod._events = {}
+  if kmod.ui_close_all then kmod.ui_close_all() end        -- windows of the previous run
   if kmod.console_clear_mods then kmod.console_clear_mods() end     -- mod commands are re-registered by the mods that load below
   if not kmod.game then
     if kmod.detect_game_version() then log("game version " .. tostring(kmod.game_version) .. " (kards " .. kmod.game .. ")")

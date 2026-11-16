@@ -95,6 +95,9 @@ static thread_local int t_gameThread = -1; // -1 unknown, 0 no, 1 yes
 static thread_local bool t_busy = false;
 
 static void OnGameTick();
+// Heartbeat: an engine timer (K2_SetTimer, every ~16 ms) calls Actor.ForceNetUpdate on the PlayerController. The call goes
+// through ProcessEvent, so it drives the tick even on a static screen where the game itself calls almost nothing.
+static UFunction* g_hbFn = nullptr;
 
 static double NowSec()
 {
@@ -123,7 +126,8 @@ static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
     if (hooked) { t_busy = true; LuaHost_PostHook(self, fn, parms); t_busy = false; }
 
     static double lastTick = 0;
-    if ((++g_peCalls & 0x0F) != 0) return;
+    const bool beat = (fn == g_hbFn);
+    if (!beat && (++g_peCalls & 0x0F) != 0) return;
     double now = NowSec();
     static double lastFast = 0;
     if (LuaHost_HasFast() && now - lastFast >= 0.004)          // fast lane (FastLoop): every few ms, only when a mod asked for it
@@ -264,6 +268,21 @@ std::vector<std::pair<std::string, std::string>> KMod_PakStatus()
 }
 
 static double g_readySince = 0;
+static double g_lastHeartbeatArm = 0;
+
+// Game thread. Arms (or re-arms: the timer is replaced, not duplicated) the heartbeat; also follows world changes.
+static void ArmHeartbeat(double now)
+{
+    if (now - g_lastHeartbeatArm < 2.0) return;
+    g_lastHeartbeatArm = now;
+    UWorld* world = UWorld::GetWorld();
+    if (!world) return;
+    UObject* pc = UGameplayStatics::GetPlayerController(world, 0);
+    if (!pc) return;
+    if (!g_hbFn) g_hbFn = APlayerController::StaticClass()->GetFunction("Actor", "ForceNetUpdate");
+    if (!g_hbFn) return;
+    UKismetSystemLibrary::K2_SetTimer(pc, FString(u"ForceNetUpdate"), 0.016f, true, false, 0.f, 0.f);
+}
 
 // Runs on the game thread (throttled ~20 Hz) from the ProcessEvent hook.
 static void OnGameTick()
@@ -274,6 +293,7 @@ static void OnGameTick()
 
     double now = NowSec();
     if (g_readySince == 0) { g_readySince = now; Log("engine ready"); KMod_MountPendingPaks(); }
+    ArmHeartbeat(now);
     if (now - g_readySince < 5.0) return; // let the game settle
     static bool stableMarked = false;
     if (!stableMarked && now - g_readySince > 60.0) { stableMarked = true; KBoot_MarkStable(); }

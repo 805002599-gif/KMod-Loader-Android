@@ -178,3 +178,77 @@ function Store.get(key, default) end
 ---@param key string
 ---@param value any
 function Store.set(key, value) end
+
+---@class KWindow
+local KWindow = {}
+---@param text string
+---@return { set_text: fun(self, text: string) }
+function KWindow:label(text) end
+---@param text string
+---@param fn fun()
+function KWindow:button(text, fn) end
+---@param label string
+---@param value boolean
+---@param fn fun(on: boolean)
+function KWindow:toggle(label, value, fn) end
+---@param label string
+---@param min number
+---@param max number
+---@param value number
+---@param fn fun(value: number)
+---@param step? number
+function KWindow:slider(label, min, max, value, fn, step) end
+---@param label string
+---@param value string
+---@param fn fun(text: string)
+function KWindow:input(label, value, fn) end
+---@param label string
+---@param options string[]
+---@param selected string
+---@param fn fun(option: string)
+function KWindow:choice(label, options, selected, fn) end
+---@param height? number
+function KWindow:spacer(height) end
+function KWindow:clear() end
+function KWindow:show() end
+function KWindow:hide() end
+function KWindow:toggle_visible() end
+---@return boolean
+function KWindow:is_open() end
+function KWindow:close() end
+
+---@class KUI
+UI = {}
+---@param opts { title?: string, width?: number, max_height?: number, show?: boolean, on_close?: fun() }
+---@return KWindow
+function UI.window(opts) end
+---@param text string
+---@param seconds? number
+function UI.toast(text, seconds) end
+
+---@class KHttpResponse
+---@field status integer 0 when the request did not get an answer
+---@field body string
+---@field headers table<string, string>
+---@field error? string
+
+---@class KHttp
+Http = {}
+---@param url string
+---@param opts? { headers?: table<string,string>, timeout?: integer, max_bytes?: integer }|fun(resp: KHttpResponse)
+---@param cb? fun(resp: KHttpResponse)
+---@return integer id
+function Http.get(url, opts, cb) end
+---@param url string
+---@param body string|table
+---@param opts? table|fun(resp: KHttpResponse)
+---@param cb? fun(resp: KHttpResponse)
+---@return integer id
+function Http.post(url, body, opts, cb) end
+---@param opts { method?: string, url: string, body?: string, headers?: table<string,string>, timeout?: integer, max_bytes?: integer }
+---@param cb fun(resp: KHttpResponse)
+---@return integer id
+function Http.request(opts, cb) end
+---@param resp KHttpResponse
+---@return any
+function Http.json(resp) end

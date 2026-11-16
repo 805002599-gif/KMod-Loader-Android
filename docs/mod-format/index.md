@@ -52,6 +52,7 @@ hello_mod/                 # 文件夹名 = 模组 id
 | `description` | 否 | 说明，显示在 Mods 页该模组的版本行上方；有 `lang` 翻译时用翻译 |
 | `api` | 否 | 需要的加载器接口级别，高于当前（`kmod.api`）就拒绝加载。新模组建议改用 `kmod>=x.y.z` |
 | `depends` | 否 | 依赖列表，见[依赖与版本条件]({% link mod-format/dependencies.md %}) |
+| `permissions` | 否 | 权限声明列表。目前只有 `"network"`：允许使用 [`Http`]({% link lua-api/mod-env/http.md %})。不认识的权限会被忽略并警告 |
 | `settings` | 否 | 设置项，见[设置项]({% link mod-format/settings.md %}) |
 
 ## 从旧布局迁移
