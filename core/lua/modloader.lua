@@ -560,3 +560,32 @@ if not kmod._lang_watch then                              -- poll the game langu
   kmod._lang_watch = true
   LoopAsync(2000, function() kmod._notify_language(); return false end)
 end
+
+-- ------------------------------------------------------------------ pak mods
+-- Every *.pak in kmod/paks is mounted through the engine (core.cpp finds the pak layer and raises the pak order of
+-- these paks above the game's, see core.cpp). Mounted once per game run: reloading mods does not mount again.
+kmod.mounted_paks = kmod.mounted_paks or {}
+
+function kmod.mount_paks()
+  local list = {}
+  for _, e in ipairs(kmod.listdir(P.root .. "/paks")) do
+    if not e.dir and e.name:lower():match("%.pak$") then list[#list + 1] = e.name end
+  end
+  table.sort(list)
+  for _, name in ipairs(list) do
+    if not kmod.mounted_paks[name] then
+      local ok = kmod.mount_pak(P.root .. "/paks/" .. name)
+      kmod.mounted_paks[name] = ok and "mounted" or "failed"
+      if ok then log("mounted pak " .. name) else logw("could not mount pak " .. name) end
+    end
+  end
+  return true
+end
+
+if not kmod._pak_watch then
+  kmod._pak_watch = true
+  LoopAsync(500, function()
+    kmod.mount_paks()
+    return true
+  end)
+end

@@ -147,6 +147,17 @@ builtin("mods", function()
   return table.concat(lines, "\n")
 end, "list installed mods and their status")
 
+builtin("paks", function()
+  local lines = {}
+  for _, e in ipairs(kmod.listdir(kmod.paths.root .. "/paks")) do
+    if not e.dir and e.name:lower():match("%.pak$") then
+      lines[#lines + 1] = string.format("  %-40s %s", e.name, (kmod.mounted_paks and kmod.mounted_paks[e.name]) or "not mounted")
+    end
+  end
+  if #lines == 0 then return "no .pak files in kmod/paks" end
+  return table.concat(lines, "\n")
+end, "list the pak files in kmod/paks and whether they were mounted")
+
 local function setEnabled(id, on)
   local rec = id and findMod(id)
   if not rec then return "unknown mod '" .. tostring(id) .. "' (see: mods)" end

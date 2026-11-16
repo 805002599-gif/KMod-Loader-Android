@@ -13,3 +13,4 @@ void LuaHost_PreHook(SDK::UObject* self, SDK::UFunction* fn, void* parms);
 void LuaHost_PostHook(SDK::UObject* self, SDK::UFunction* fn, void* parms);
 void LuaHost_RunString(const std::string& code, const char* chunkName);
 void LuaHost_ReloadMods();
+bool KMod_MountPak(const std::string& path);           // core.cpp; game thread: mount a .pak through the engine

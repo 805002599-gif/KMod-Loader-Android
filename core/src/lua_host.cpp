@@ -1618,6 +1618,8 @@ void LuaHost_Init()
     }
     lua_getglobal(L, "kmod");
     lua_pushcfunction(L, Worker_Create); lua_setfield(L, -2, "worker");
+    lua_pushcfunction(L, [](lua_State* S) -> int { lua_pushboolean(S, KMod_MountPak(luaL_checkstring(S, 1))); return 1; });
+    lua_setfield(L, -2, "mount_pak");
     lua_pushcfunction(L, Ccb_ListDir); lua_setfield(L, -2, "listdir");
     lua_pushcfunction(L, Ccb_Exists); lua_setfield(L, -2, "exists");
     lua_pushcfunction(L, Ccb_Mkdir); lua_setfield(L, -2, "mkdir");
