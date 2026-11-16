@@ -222,18 +222,170 @@ builtin("find", function(args)
   return table.concat(lines, "\n")
 end, "list live objects of a class", "find <class> [limit]")
 
-local function classMembers(args, what)
-  if not args[1] then return "usage: " .. what .. " <class>" end
-  local c = FindObject("Class", args[1])
-  if not c then return "class '" .. args[1] .. "' not found (use the name without U/A prefix)" end
+local function findClass(name)
+  local c = FindObject("Class", name)
+  if not c:IsValid() then return nil end
+  return c
+end
+
+builtin("props", function(args)
+  if not args[1] then return "usage: props <class>" end
+  local c = findClass(args[1])
+  if not c then return "class '" .. args[1] .. "' not found (use the name without U/A prefix; try: search " .. args[1] .. ")" end
   local lines = {}
-  local list = what == "props" and c:GetProperties() or c:GetFunctions()
-  for _, v in pairs(list) do
-    if type(v) == "table" then lines[#lines + 1] = "  " .. tostring(v.name) .. (v.type and (" : " .. v.type) or "") .. (v.owner and ("  (" .. v.owner .. ")") or "")
-    else lines[#lines + 1] = "  " .. tostring(v) end
+  for _, v in pairs(c:GetProperties()) do
+    lines[#lines + 1] = "  " .. tostring(v.name) .. " : " .. tostring(v.type) .. "  (" .. tostring(v.owner) .. ")"
   end
   table.sort(lines)
-  return #lines .. " " .. what .. "\n" .. table.concat(lines, "\n")
+  return #lines .. " props\n" .. table.concat(lines, "\n")
+end, "list the properties of a class", "props <class>")
+
+builtin("funcs", function(args)
+  if not args[1] then return "usage: funcs <class> [filter]" end
+  local c = findClass(args[1])
+  if not c then return "class '" .. args[1] .. "' not found (use the name without U/A prefix; try: search " .. args[1] .. ")" end
+  local filter = args[2] and args[2]:lower()
+  local lines = {}
+  for _, f in ipairs(kmod.signatures(c)) do
+    if not filter or f.name:lower():find(filter, 1, true) then
+      lines[#lines + 1] = "  " .. f.owner .. "." .. f.name .. f.sig
+    end
+  end
+  table.sort(lines)
+  return #lines .. " funcs\n" .. table.concat(lines, "\n")
+end, "list a class's functions with their parameters", "funcs <class> [filter]")
+
+-- search <words...> [class|object|function|all] [limit]
+builtin("search", function(args)
+  local kinds = { class = "class", c = "class", object = "object", o = "object", ["function"] = "function", func = "function", f = "function", all = "all", a = "all" }
+  local limit, kind = 20, "all"
+  local words = {}
+  for _, a in ipairs(args) do
+    if kinds[a:lower()] and #words > 0 then kind = kinds[a:lower()]
+    elseif a:match("^%d+$") and #words > 0 then limit = tonumber(a)
+    else words[#words + 1] = a end
+  end
+  if #words == 0 then return "usage: search <words...> [class|object|function|all] [limit]" end
+  local pattern = table.concat(words, " ")
+  local out = {}
+  local function section(k, title)
+    local res, total = kmod.search(pattern, k, limit)
+    table.sort(res, function(x, y) if #x.path ~= #y.path then return #x.path < #y.path end return x.path < y.path end)
+    out[#out + 1] = title .. " (" .. total .. (total > #res and (", showing " .. #res) or "") .. ")"
+    for _, r in ipairs(res) do out[#out + 1] = "  " .. r.path .. (k == "object" and ("  [" .. r.class .. "]") or "") end
+  end
+  if kind == "all" or kind == "class" then section("class", "classes") end
+  if kind == "all" or kind == "object" then section("object", "objects") end
+  if kind == "all" or kind == "function" then section("function", "functions") end
+  return table.concat(out, "\n")
+end, "search classes, objects and functions by path (all words must match, any case)", "search <words...> [class|object|function|all] [limit]")
+
+-- ------------------------------------------------------------------ hook: print the arguments of every call
+local hooks = kmod._cmd_hooks or {}          -- path -> { id, calls, max, params }
+kmod._cmd_hooks = hooks
+local DEFAULT_CALLS = 20
+
+local function fmt(v, depth)
+  depth = depth or 0
+  local t = type(v)
+  if t == "string" then
+    local s = #v > 60 and (v:sub(1, 60) .. "...") or v
+    return '"' .. s .. '"'
+  elseif t == "number" or t == "boolean" or t == "nil" then return tostring(v)
+  elseif t == "userdata" then
+    local ok, s = pcall(function() if v:IsValid() then return v:GetPathName() end return "invalid" end)
+    if ok then return "<" .. s .. ">" end
+    return tostring(v)
+  elseif t == "table" then
+    if depth >= 1 then return "{...}" end
+    local parts, n = {}, 0
+    for k, x in pairs(v) do
+      n = n + 1
+      if n > 4 then parts[#parts + 1] = "..."; break end
+      parts[#parts + 1] = tostring(k) .. "=" .. fmt(x, depth + 1)
+    end
+    return "{" .. table.concat(parts, ", ") .. "}"
+  end
+  return tostring(v)
 end
-builtin("props", function(args) return classMembers(args, "props") end, "list the properties of a class", "props <class>")
-builtin("funcs", function(args) return classMembers(args, "funcs") end, "list the functions of a class", "funcs <class>")
+
+local function selfName(self)
+  local ok, s = pcall(function() return self:GetPathName() end)
+  return ok and s or "?"
+end
+
+local function describe(params, p, outputs)
+  local parts = {}
+  for _, pi in ipairs(params) do
+    local isOut = pi.out or pi.ret
+    if isOut == outputs then
+      local ok, v = pcall(function() return p[pi.name] end)
+      parts[#parts + 1] = pi.name .. "=" .. (ok and fmt(v) or "?")
+    end
+  end
+  return table.concat(parts, ", ")
+end
+
+local function unhook(path)
+  local h = hooks[path]
+  if not h then return false end
+  UnregisterHook(h.id)
+  hooks[path] = nil
+  return true
+end
+
+local function SigOfParams(params)
+  local parts = {}
+  for _, pi in ipairs(params) do
+    if not pi.ret then parts[#parts + 1] = (pi.out and "out " or "") .. pi.name .. ": " .. pi.type end
+  end
+  return "(" .. table.concat(parts, ", ") .. ")"
+end
+
+builtin("hook", function(args)
+  local path = args[1]
+  if not path then return "usage: hook <function path> [max calls (default " .. DEFAULT_CALLS .. ", 0 = unlimited)]" end
+  if hooks[path] then return "already hooked (unhook " .. path .. " first)" end
+  local max = args[2] and tonumber(args[2]) or DEFAULT_CALLS
+  local params = kmod.func_params(path)
+  if not params then return "function not found: " .. path .. " (try: search <word> function)" end
+  local hasOut = false
+  for _, pi in ipairs(params) do if pi.out or pi.ret then hasOut = true end end
+  local h = { calls = 0, max = max, params = params }
+  local function pre(self, p)
+    h.calls = h.calls + 1
+    print(string.format("[hook %d] %s  self=%s  (%s)", h.calls, path, selfName(self), describe(params, p, false)))
+    if max > 0 and h.calls >= max and not hasOut then
+      unhook(path); print("[hook] " .. path .. ": reached " .. max .. " calls, removed")
+    end
+  end
+  local function post(self, p)
+    if hasOut then
+      print(string.format("[hook %d]   -> %s", h.calls, describe(params, p, true)))
+      if max > 0 and h.calls >= max and hooks[path] then
+        unhook(path); print("[hook] " .. path .. ": reached " .. max .. " calls, removed")
+      end
+    end
+  end
+  local ok, id = pcall(RegisterHook, path, pre, post)
+  if not ok then return "cannot hook " .. path .. ": " .. tostring(id):match("^[^\n]*") end
+  h.id = id
+  hooks[path] = h
+  return "hooked " .. path .. " " .. SigOfParams(params) .. (max > 0 and (" for " .. max .. " calls") or " (unlimited)")
+end, "print the arguments of every call to a function", "hook <function path> [max calls]")
+
+builtin("unhook", function(args)
+  if args[1] == "all" or args[1] == nil then
+    local n = 0
+    for path in pairs(hooks) do unhook(path); n = n + 1 end
+    return n .. " hook(s) removed"
+  end
+  return unhook(args[1]) and ("removed " .. args[1]) or ("not hooked: " .. args[1])
+end, "remove one console hook, or all", "unhook [function path|all]")
+
+builtin("hooks", function()
+  local lines = {}
+  for path, h in pairs(hooks) do lines[#lines + 1] = string.format("  %-60s %d call(s)%s", path, h.calls, h.max > 0 and (" / " .. h.max) or "") end
+  table.sort(lines)
+  return #lines > 0 and table.concat(lines, "\n") or "no console hooks"
+end, "list active console hooks")

@@ -426,20 +426,20 @@ int M_IsValid(lua_State* L) { LuaObj* o = ToLuaObj(L, 1); lua_pushboolean(L, o &
 int M_GetFullName(lua_State* L) { UObject* o = CheckObj(L, 1); lua_pushstring(L, o->GetFullName().c_str()); return 1; }
 int M_GetName(lua_State* L) { UObject* o = CheckObj(L, 1); lua_pushstring(L, o->GetName().c_str()); return 1; }
 // Package-qualified path ("/Game/UI/Foo.Foo_C", "/Game/Maps/M.M:PersistentLevel"), unlike GetFullName which drops package paths.
-int M_GetPathName(lua_State* L)
+std::string PathOf(UObject* o)
 {
-    UObject* o = CheckObj(L, 1);
     std::vector<UObject*> chain;
     for (UObject* c = o; c && chain.size() < 32; c = c->Outer) chain.push_back(c);
     std::string path;
     for (size_t i = chain.size(); i-- > 0;)
     {
-        if (i + 1 == chain.size()) path = InSDKUtils::GetNameByIndex(chain[i]->Name.GetDisplayIndex());
-        else path += (i + 2 == chain.size() ? "." : ":") + InSDKUtils::GetNameByIndex(chain[i]->Name.GetDisplayIndex());
+        std::string n = InSDKUtils::GetNameByIndex(chain[i]->Name.GetDisplayIndex());
+        if (i + 1 == chain.size()) path = n;
+        else path += (i + 2 == chain.size() ? "." : ":") + n;
     }
-    lua_pushstring(L, path.c_str());
-    return 1;
+    return path;
 }
+int M_GetPathName(lua_State* L) { UObject* o = CheckObj(L, 1); lua_pushstring(L, PathOf(o).c_str()); return 1; }
 int M_GetClass(lua_State* L) { UObject* o = CheckObj(L, 1); PushObject(L, o->Class); return 1; }
 int M_GetOuter(lua_State* L) { UObject* o = CheckObj(L, 1); PushObject(L, o->Outer); return 1; }
 int M_GetAddress(lua_State* L) { UObject* o = CheckObj(L, 1); lua_pushinteger(L, (lua_Integer)(uintptr_t)o); return 1; }
@@ -486,6 +486,76 @@ int M_GetFunctions(lua_State* L)
             if (f->Class == fcls)
             {
                 lua_pushstring(L, (c->GetName() + "." + f->GetName()).c_str());
+                lua_rawseti(L, -2, i++);
+            }
+    return 1;
+}
+
+// ---- type names and function signatures (console: funcs / hook / search) ----
+std::string TypeName(FProperty* p, int depth = 0)
+{
+    if (!p) return "?";
+    if (depth > 3) return "...";
+    switch (TypeOf(p))
+    {
+    case T_Bool: return "bool"; case T_Int8: return "int8"; case T_Byte: return "byte"; case T_Int16: return "int16";
+    case T_UInt16: return "uint16"; case T_Int: return "int"; case T_UInt32: return "uint32"; case T_Int64: return "int64";
+    case T_UInt64: return "uint64"; case T_Float: return "float"; case T_Double: return "double"; case T_Name: return "Name";
+    case T_Str: return "String"; case T_Text: return "Text";
+    case T_Object: { auto* c = static_cast<FObjectPropertyBase*>(p)->PropertyClass; return "Object<" + (c ? c->GetName() : std::string("?")) + ">"; }
+    case T_Class: { auto* c = static_cast<FClassProperty*>(p)->MetaClass; return "Class<" + (c ? c->GetName() : std::string("?")) + ">"; }
+    case T_Struct: { auto* st = static_cast<FStructProperty*>(p)->Struct; return "Struct<" + (st ? st->GetName() : std::string("?")) + ">"; }
+    case T_Enum: { auto* e = static_cast<FEnumProperty*>(p)->Enum; return "Enum<" + (e ? e->GetName() : std::string("?")) + ">"; }
+    case T_Array: return "Array<" + TypeName(static_cast<FArrayProperty*>(p)->InnerProperty, depth + 1) + ">";
+    case T_Map: { auto* m = static_cast<FMapProperty*>(p); return "Map<" + TypeName(m->KeyProperty, depth + 1) + "," + TypeName(m->ValueProperty, depth + 1) + ">"; }
+    case T_Set: return "Set<" + TypeName(static_cast<FSetProperty*>(p)->ElementProperty, depth + 1) + ">";
+    default: { std::string n = p->ClassPrivate->Name.ToString(); size_t k = n.rfind("Property"); return k != std::string::npos ? n.substr(0, k) : n; }
+    }
+}
+
+struct ParamInfo { std::string name, type; bool out, ret, isConst; };
+std::vector<ParamInfo> ParamsOf(UFunction* fn)
+{
+    std::vector<ParamInfo> v;
+    for (FField* f = fn->ChildProperties; f; f = f->Next)
+    {
+        FProperty* p = static_cast<FProperty*>(f);
+        if (!(p->PropertyFlags & CPF_Parm)) continue;
+        bool ret = (p->PropertyFlags & CPF_ReturnParm) != 0;
+        bool out = (p->PropertyFlags & CPF_OutParm) && !(p->PropertyFlags & CPF_ConstParm);
+        v.push_back({f->Name.ToString(), TypeName(p), out && !ret, ret, (p->PropertyFlags & CPF_ConstParm) != 0});
+    }
+    return v;
+}
+
+std::string SigOf(UFunction* fn)
+{
+    std::string in, ret;
+    for (auto& pi : ParamsOf(fn))
+    {
+        if (pi.ret) { ret = pi.type; continue; }
+        if (!in.empty()) in += ", ";
+        in += (pi.out ? "out " : "") + pi.name + ": " + pi.type;
+    }
+    return "(" + in + ")" + (ret.empty() ? "" : " -> " + ret);
+}
+
+// kmod.signatures(classOrObject) -> { {owner=, name=, sig=}, ... } for the class chain
+int Kmod_Signatures(lua_State* L)
+{
+    UObject* o = CheckObj(L, 1);
+    UStruct* s = o->IsA(UStruct::StaticClass()) ? static_cast<UStruct*>(o) : static_cast<UStruct*>(o->Class);
+    UClass* fcls = UFunction::StaticClass();
+    lua_newtable(L);
+    int i = 1;
+    for (UStruct* c = s; c; c = c->SuperStruct)
+        for (UField* f = c->Children; f; f = f->Next)
+            if (f->Class == fcls)
+            {
+                lua_newtable(L);
+                lua_pushstring(L, c->GetName().c_str()); lua_setfield(L, -2, "owner");
+                lua_pushstring(L, f->GetName().c_str()); lua_setfield(L, -2, "name");
+                lua_pushstring(L, SigOf(static_cast<UFunction*>(f)).c_str()); lua_setfield(L, -2, "sig");
                 lua_rawseti(L, -2, i++);
             }
     return 1;
@@ -685,6 +755,62 @@ int G_FindObject(lua_State* L)   // FindObject(className, objectShortName)
 }
 
 int G_CreateInvalidObject(lua_State* L) { PushObject(L, nullptr); return 1; }
+
+// kmod.func_params(path) -> { {name=, type=, out=, ret=}, ... } | nil
+int Kmod_FuncParams(lua_State* L)
+{
+    UFunction* fn = static_cast<UFunction*>(FindByPath(luaL_checkstring(L, 1), true));
+    if (!fn) { lua_pushnil(L); return 1; }
+    lua_newtable(L);
+    int i = 1;
+    for (auto& pi : ParamsOf(fn))
+    {
+        lua_newtable(L);
+        lua_pushstring(L, pi.name.c_str()); lua_setfield(L, -2, "name");
+        lua_pushstring(L, pi.type.c_str()); lua_setfield(L, -2, "type");
+        lua_pushboolean(L, pi.out); lua_setfield(L, -2, "out");
+        lua_pushboolean(L, pi.ret); lua_setfield(L, -2, "ret");
+        lua_rawseti(L, -2, i++);
+    }
+    return 1;
+}
+
+std::string Lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
+
+// kmod.search(pattern, kind, limit) -> results, total.   kind: "class" | "object" | "function" (default "class").
+// Every space-separated word of `pattern` must occur in the object's full path (case-insensitive).
+// results = { {path=, class=}, ... } (at most `limit`), total = number of matches.
+int Kmod_Search(lua_State* L)
+{
+    std::string pat = Lower(luaL_checkstring(L, 1));
+    std::string kind = luaL_optstring(L, 2, "class");
+    int limit = (int)luaL_optinteger(L, 3, 30);
+    std::vector<std::string> words;
+    { size_t i = 0; while (i < pat.size()) { while (i < pat.size() && pat[i] == ' ') i++; size_t j = i; while (j < pat.size() && pat[j] != ' ') j++; if (j > i) words.push_back(pat.substr(i, j - i)); i = j; } }
+    lua_newtable(L);
+    int n = 0, total = 0;
+    UClass* ucls = UClass::StaticClass();
+    UClass* fcls = UFunction::StaticClass();
+    UClass* pkg = UPackage::StaticClass();
+    ForEachObject([&](UObject* o) {
+        bool isClass = o->IsA(ucls), isFunc = o->Class == fcls;
+        if (kind == "class" ? !isClass : kind == "function" ? !isFunc : (isClass || isFunc || o->Class == pkg || IsCDO(o))) return false;
+        std::string path = PathOf(o);
+        std::string lp = Lower(path);
+        for (auto& w : words) if (lp.find(w) == std::string::npos) return false;
+        total++;
+        if (n < limit)
+        {
+            lua_newtable(L);
+            lua_pushstring(L, path.c_str()); lua_setfield(L, -2, "path");
+            lua_pushstring(L, o->Class ? o->Class->GetName().c_str() : ""); lua_setfield(L, -2, "class");
+            lua_rawseti(L, -2, ++n);
+        }
+        return false;
+    });
+    lua_pushinteger(L, total);
+    return 2;
+}
 
 // LoadAsset(path) -> UObject | nil, err.   Synchronously loads any asset (pak content included) by object path,
 // e.g. "/Game/UI/Foo/WBP_Foo.WBP_Foo_C" (a Blueprint class) or "/Game/Art/T_Icon.T_Icon". A path without ".Name" gets
@@ -1306,6 +1432,9 @@ void LuaHost_Init()
     lua_pushcfunction(L, Ccb_Rmtree); lua_setfield(L, -2, "rmtree");
     lua_pushcfunction(L, Ccb_ModApi); lua_setfield(L, -2, "mod_api");
     lua_pushcfunction(L, Kmod_Log); lua_setfield(L, -2, "log");
+    lua_pushcfunction(L, Kmod_Signatures); lua_setfield(L, -2, "signatures");
+    lua_pushcfunction(L, Kmod_FuncParams); lua_setfield(L, -2, "func_params");
+    lua_pushcfunction(L, Kmod_Search); lua_setfield(L, -2, "search");
 #ifdef KMOD_DEV
     lua_pushcfunction(L, Kmod_DebugCrash); lua_setfield(L, -2, "debug_crash");
 #endif

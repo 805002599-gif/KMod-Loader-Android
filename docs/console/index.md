@@ -26,10 +26,12 @@ kmod 有一套指令系统：[内置指令]({% link console/builtin.md %})用来
 
 写模组时常要先弄清游戏里有什么。控制台里能做的：
 
+- `search <关键字>`：按名字模糊搜类、对象、函数。
 - `find <类名>`：列出存活对象的完整路径。
-- `props <类名>` / `funcs <类名>`：列出类的属性、函数。
+- `props <类名>` / `funcs <类名>`：列出类的属性、函数（`funcs` 带参数和返回值类型）。
+- `hook <函数路径>`：监听函数调用，把每次的参数打出来。
 - 直接写 Lua：`FindFirstOf("PlayerController").Pawn:GetPathName()`。
 - 开发版的 `kmod.print_tree(widget, 深度)`：打印控件树。
 - [`LoadAsset`]({% link lua-api/global-functions/loadasset.md %})：加载 pak 里的资源再去读它。
 
-与 UE4SS 相比，kmod **没有**一键转储对象列表、USMAP 或头文件的功能，也没有"监听某个函数并打印参数"的现成指令；想要全量数据，目前还得用 Dumper-7 离线转储。
+与 UE4SS 相比，kmod **没有**一键转储对象列表、USMAP 或头文件的功能；想要全量数据，目前还得用 Dumper-7 离线转储。

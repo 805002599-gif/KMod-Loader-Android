@@ -29,9 +29,9 @@ nav_order: 8
 - 模组环境：`Mod`、`Log`、`Settings`、`Lang`、`Console`、`require`、`kmod`。
 
 **工具**
-- 控制台指令系统：`help`、`version`、`mods`、`enable`、`disable`、`reload`、`lang`、`settings`、`log`、`find`、`props`、`funcs`，模组可注册指令。
+- 控制台指令系统：`help`、`version`、`mods`、`enable`、`disable`、`reload`、`lang`、`settings`、`log`、`find`、`search`、`props`、`funcs`（带参数类型）、`hook` / `unhook` / `hooks`（监听函数调用并打印参数），模组可注册指令。
 - 日志：滚动文件日志（保留 5 次运行），原生崩溃处理写入 `FATAL` 回溯。
 
 **已知缺口**
 - 没有 C++ 模组接口；只有 Android，Windows 版未做。
-- 没有一键转储对象 / USMAP / 头文件，没有按函数监听参数的指令。
+- 没有一键转储对象 / USMAP / 头文件。
