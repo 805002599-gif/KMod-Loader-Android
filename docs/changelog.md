@@ -22,6 +22,12 @@ nav_order: 8
 - 脚本报错自动禁用：钩子、定时器、新对象回调累计 10 次错误。
 - 游戏内 Mods 页：嵌在设置界面，跟随游戏的 UI 缩放，显示名称、说明、版本、状态、启用开关和设置项。
 
+**未发布的更新**
+- `Worker`：独立线程、独立 Lua 状态，消息通信（见 [Worker]({% link lua-api/global-functions/worker.md %})）；`ExecuteAsync`（别名）。
+- `FastLoop`，`NotifyOnNewObject` 的快速模式；新对象检测改为比较槽位序号，不再漏掉被复用的槽位。
+- `kmod/paks/` 里的 pak 启动后自动挂载，优先级高于游戏自带 pak（见 [Pak 模组]({% link guide/pak-mods.md %})）。
+- 控制台指令 `paks`。
+
 **Lua API**
 - 查找：`FindFirstOf`、`FindAllOf`、`FindObject`、`StaticFindObject`、`CreateInvalidObject`。
 - 资源：`LoadAsset`（同步加载 pak 内容）；`obj:GetPathName()`。
