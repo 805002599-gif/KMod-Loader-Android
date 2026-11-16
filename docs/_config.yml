@@ -1,5 +1,28 @@
 title: kmod loader
-description: A Lua mod loader for KARDS (Android; Windows planned)
-theme: jekyll-theme-minimal
-markdown: kramdown
+description: KARDS 的 Lua 模组加载器（Android；Windows 计划中）
 lang: zh-CN
+remote_theme: just-the-docs/just-the-docs@v0.10.0
+plugins:
+  - jekyll-remote-theme
+search_enabled: true
+heading_anchors: true
+color_scheme: light
+back_to_top: true
+back_to_top_text: 回到顶部
+aux_links:
+  GitHub: https://github.com/CCB-TEAM/KMod-Loader-Android
+aux_links_new_tab: true
+footer_content: "kmod loader 以 MIT 许可证发布。KARDS 属于其权利人，本项目与其无关联。"
+callouts:
+  note:
+    title: 注意
+    color: blue
+  warning:
+    title: 警告
+    color: red
+  tip:
+    title: 提示
+    color: green
+  untested:
+    title: 未验证
+    color: yellow

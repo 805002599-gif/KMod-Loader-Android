@@ -1,5 +1,7 @@
 ---
 title: 调试与日志
+nav_order: 1
+parent: 指南
 ---
 
 # 调试与日志
@@ -44,8 +46,9 @@ adb logcat -s KModCore KModLoader
 
 ### 悬浮窗
 
-游戏画面上有一个可拖动的绿色 **kmod** 按钮，点开是控制台面板，能看到所有日志输出。点输入栏会弹出输入框，输入 Lua 表达式或语句并执行，表达式的结果会打印出来；输入已注册的[控制台指令](console.html)（如 `help`、`mods`）则执行指令；**Last** 按钮填回上一条命令。
+游戏画面上有一个可拖动的绿色 **kmod** 按钮，点开是控制台面板，能看到所有日志输出。点输入栏会弹出输入框，输入 Lua 表达式或语句并执行，表达式的结果会打印出来；输入已注册的[控制台指令]({% link console/index.md %})（如 `help`、`mods`）则执行指令；**Last** 按钮填回上一条命令。
 
+{: .note }
 > 游戏主窗口拿不到输入法焦点，所以输入框是单独弹出的对话框。
 
 ### 文件控制台
@@ -57,7 +60,7 @@ adb push console.lua /sdcard/Android/data/com.android1939.kardsapk/files/kmod/de
 adb shell cat /sdcard/Android/data/com.android1939.kardsapk/files/kmod/dev/console.out
 ```
 
-`console.lua` 里 `print` 的内容会进入 `console.out`。`console.lua` 在启动时也会跑，别忘了测完删掉它。
+`console.lua` 里 `print` 的内容会进入 `console.out`。它在启动时也会跑，别忘了测完删掉。
 
 ## 热加载（开发版）
 
@@ -71,8 +74,8 @@ adb shell cat /sdcard/Android/data/com.android1939.kardsapk/files/kmod/dev/conso
 | 现象 | 看哪里 |
 |---|---|
 | 模组没加载 | `kmod.log` 里搜模组 id；Mods 页的状态文字 |
-| `requires kmod>=...` / `requires kards>=...` | 加载器或游戏版本不够，见 [依赖与版本条件](mod-format.html#依赖与版本条件) |
+| `requires kmod>=...` / `requires kards>=...` | 加载器或游戏版本不够，见[依赖与版本条件]({% link mod-format/dependencies.md %}) |
 | `needs loader API N` | `mod.json` 的 `api` 高于当前加载器的 `kmod.api` |
 | 修改模组后没生效 | 进 Mods 页会重新加载；也可以重启游戏 |
-| 访问对象报 `UObject is invalid` | 对象已被销毁，用 `obj:IsValid()` 检查，或每次重新 `FindFirstOf` |
+| 访问对象报 `UObject is invalid` | 对象已被销毁，用 `obj:IsValid()` 检查，或每次重新 `FindFirstOf`，见[对象与有效性]({% link concepts/object-validity.md %}) |
 | 游戏闪退 | 重启后看 `kmod.1.log` 末尾的 `FATAL` 行 |

@@ -1,25 +1,27 @@
 ---
 title: 构建加载器
+nav_order: 5
+parent: 指南
 ---
 
 # 构建加载器
 
-这页说明怎样从源码生成补丁后的 APK。只想写模组的话不需要看这页，拿现成的 APK 装上即可。
+只想写模组的话不需要看这页，拿现成的 APK 装上即可。
 
+{: .warning }
 > **不要公开分发补丁后的 APK**：里面有游戏本体。只公开加载器的源码和模组。
 
 ## 仓库结构
 
 ```
-android/
-├── build.ps1              # 一键构建：build.ps1 -Flavor dev|release
-├── loader/                # libkmod.so：加载器壳，被 SplashActivity 的静态初始化加载
-├── core/                  # libkmodcore.so：核心（hook、Lua 虚拟机、反射、日志）
-│   ├── src/               # C++：core.cpp、lua_host.cpp、kmod_log.cpp ...
-│   └── lua/               # modloader.lua（加载与依赖）、modmanager.lua（Mods 页）
-├── overlay/kmod/Overlay.java   # 仅开发版：悬浮控制台（打成 classes2.dex）
-├── tools/                 # DexTool.java（给 SplashActivity 加 loadLibrary）、repack.py
-└── docs/                  # 本文档
+build.ps1              # 一键构建：build.ps1 -Flavor dev|release
+loader/                # libkmod.so：加载器壳，被 SplashActivity 的静态初始化加载
+core/                  # libkmodcore.so：核心（hook、Lua 虚拟机、反射、日志）
+├── src/               # C++：core.cpp、lua_host.cpp、kmod_log.cpp ...
+└── lua/               # modloader.lua（加载与依赖）、modmanager.lua（Mods 页）、commands.lua（控制台指令）
+overlay/kmod/Overlay.java   # 仅开发版：悬浮控制台（打成 classes2.dex）
+tools/                 # DexTool.java（给 SplashActivity 加 loadLibrary）、repack.py
+docs/                  # 本文档
 ```
 
 ## 需要的东西
@@ -82,10 +84,10 @@ adb install -r kards_mod.apk
 
 ## 改 Lua 部分
 
-`modloader.lua` 和 `modmanager.lua` 在编译时被嵌入核心。开发时不必每次重新编译：把改过的文件放到设备的 `kmod/dev/` 下，开发版会优先使用它们。定稿后再重新构建，把它们嵌进核心。
+`modloader.lua`、`modmanager.lua`、`commands.lua` 在编译时被嵌入核心。开发时不必每次重新编译：把改过的 `modloader.lua` / `modmanager.lua` 放到设备的 `kmod/dev/` 下，开发版会优先使用它们。定稿后再重新构建。
 
 ## 已知限制
 
 - 目前只有 Android arm64。Windows 版会复用 Lua 部分，hook 和日志部分需要另写。
 - 暂时没有 C++ 模组接口，模组只能用 Lua。
-- 游戏版本变化后，SDK 偏移要重新转储，`kards>=` 依赖可以帮模组声明自己适用的游戏版本。
+- 游戏版本变化后，SDK 偏移要重新转储；模组可以用 `kards>=` 依赖声明自己适用的游戏版本。
