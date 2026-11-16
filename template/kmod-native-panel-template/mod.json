@@ -1,0 +1,11 @@
+{
+  "format": 2,
+  "platform": ["Android"],
+  "native": "libmy_panel_mod.so",
+  "id": "my_panel_mod",
+  "name": "My Panel Mod",
+  "version": "0.1.0",
+  "author": "you",
+  "description": "A native mod with a settings panel built from C++.",
+  "depends": ["kmod>=0.2.0"]
+}

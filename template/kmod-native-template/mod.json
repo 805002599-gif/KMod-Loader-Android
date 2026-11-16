@@ -1,0 +1,11 @@
+{
+  "format": 2,
+  "platform": ["Android"],
+  "native": "libmy_native_mod.so",
+  "id": "my_native_mod",
+  "name": "My Native Mod",
+  "version": "0.1.0",
+  "author": "you",
+  "description": "A C++ mod.",
+  "depends": ["kmod>=0.2.0"]
+}

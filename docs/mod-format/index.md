@@ -4,7 +4,7 @@ nav_order: 4
 has_children: true
 ---
 
-# 模组包格式（format 1）
+# 模组包格式（format 1 和 2）
 
 一个包 = 一个文件夹；本地化可选，不写也能用。
 
@@ -26,7 +26,8 @@ hello_mod/                 # 文件夹名 = 模组 id
 
 ```json
 {
-  "format": 1,
+  "format": 2,
+  "platform": ["Windows", "Android"],
   "id": "hello_mod",
   "name": "Hello Mod",
   "version": "1.0.0",
@@ -44,7 +45,8 @@ hello_mod/                 # 文件夹名 = 模组 id
 
 | 字段 | 必需 | 说明 |
 |---|---|---|
-| `format` | 是 | 包格式版本，目前是 1 |
+| `format` | 是 | 包格式版本：1 或 2。用了 `platform`（或原生库）的包写 2，只认识 1 的旧加载器会直接拒绝它，而不是在错误的平台上运行 |
+| `platform` | 否 | 支持的平台：`"Android"`、`"Windows"` 或列表 `["Windows", "Android"]`（不区分大小写）。**没有这个字段 = 所有平台**，纯 Lua 模组一般不用写。当前平台不在列表里时，模组不会加载，Mods 页显示"不适用于本平台"，也不能启用。带原生库的模组必须声明它为哪些平台编译 |
 | `id` | 是 | 小写字母、数字、下划线（`^[a-z0-9_]+$`）；必须和文件夹名一致 |
 | `version` | 是 | 版本号，供依赖检查和显示 |
 | `name` | 否 | 默认显示名（通常英文）；缺省用 id |
@@ -52,6 +54,7 @@ hello_mod/                 # 文件夹名 = 模组 id
 | `description` | 否 | 说明，显示在 Mods 页该模组的版本行上方；有 `lang` 翻译时用翻译 |
 | `api` | 否 | 需要的加载器接口级别，高于当前（`kmod.api`）就拒绝加载。新模组建议改用 `kmod>=x.y.z` |
 | `depends` | 否 | 依赖列表，见[依赖与版本条件]({% link mod-format/dependencies.md %}) |
+| `native` | 否 | C++ 模组的库文件名，在包里的 `native/arm64-v8a/` 下找。必须同时是 `"format": 2` 并写 `platform`；有 `native` 时 `main.lua` 可以没有。见 [C++ 模组]({% link guide/native-mods.md %}) |
 | `permissions` | 否 | 权限声明列表。目前只有 `"network"`：允许使用 [`Http`]({% link lua-api/mod-env/http.md %})、[WebSocket 与 Socket]({% link lua-api/mod-env/sockets.md %})；`"game_network"`：允许使用 [`Net`]({% link lua-api/mod-env/net.md %})（观察和修改游戏自己的 WebSocket 消息）。不认识的权限会被忽略并警告 |
 | `settings` | 否 | 设置项，见[设置项]({% link mod-format/settings.md %}) |
 

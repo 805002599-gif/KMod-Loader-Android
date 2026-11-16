@@ -63,21 +63,64 @@ static bool IsPcRelative(uint32_t i)
     return false;
 }
 
+// Copies the 4 instructions that the hook overwrites into the trampoline. Position-dependent instructions are rewritten so they
+// still work at the new address: ADR/ADRP/LDR (literal)/B/BL become an absolute load of the original target. Conditional
+// branches (B.cond, CBZ, TBZ ...) in the first 4 instructions are not supported.
+static bool RelocatePrologue(const uint32_t* code, uint32_t* tr, size_t& n)
+{
+    auto loadAbs = [&](int reg, uint64_t abs)
+    {
+        tr[n++] = 0x58000040u | (uint32_t)reg;       // ldr Xreg, #8
+        tr[n++] = 0x14000003u;                       // b +12 (over the literal)
+        memcpy(&tr[n], &abs, 8); n += 2;
+    };
+    for (int i = 0; i < 4; i++)
+    {
+        uint32_t ins = code[i];
+        uint64_t pc = reinterpret_cast<uint64_t>(&code[i]);
+        if ((ins & 0x9F000000) == 0x90000000 || (ins & 0x9F000000) == 0x10000000)          // ADRP / ADR
+        {
+            int64_t imm = (int64_t)((((ins >> 5) & 0x7FFFF) << 2) | ((ins >> 29) & 3));
+            if (imm & 0x100000) imm -= 0x200000;
+            uint64_t abs = (ins & 0x80000000) ? ((pc & ~0xFFFull) + (uint64_t)(imm << 12)) : (pc + (uint64_t)imm);
+            loadAbs(ins & 31, abs);
+        }
+        else if ((ins & 0x3B000000) == 0x18000000)                                          // LDR (literal)
+        {
+            if (ins & 0x04000000) { Log("hook: SIMD literal load in the prologue, refusing"); return false; }
+            uint32_t opc = ins >> 30;
+            if (opc == 3) { Log("hook: PRFM literal in the prologue, refusing"); return false; }
+            int64_t off = (int64_t)((ins >> 5) & 0x7FFFF); if (off & 0x40000) off -= 0x80000;
+            loadAbs(16, pc + (uint64_t)(off * 4));
+            uint32_t rt = ins & 31;
+            tr[n++] = (opc == 1 ? 0xF9400000u : opc == 2 ? 0xB9800000u : 0xB9400000u) | (16u << 5) | rt;   // ldr X/W/sw Rt, [x16]
+        }
+        else if ((ins & 0x7C000000) == 0x14000000)                                          // B / BL
+        {
+            int64_t off = (int64_t)(ins & 0x3FFFFFF); if (off & 0x2000000) off -= 0x4000000;
+            loadAbs(16, pc + (uint64_t)(off * 4));
+            tr[n++] = (ins & 0x80000000) ? 0xD63F0200u : 0xD61F0200u;                      // blr x16 / br x16
+        }
+        else if ((ins & 0xFF000010) == 0x54000000 || (ins & 0x7E000000) == 0x34000000 || (ins & 0x7E000000) == 0x36000000)
+        { Log("hook: conditional branch (0x%08x) in the prologue, refusing", ins); return false; }
+        else tr[n++] = ins;
+    }
+    return true;
+}
+
 static bool InstallInlineHook(void* target, void* detour, void** outTrampoline)
 {
     uint32_t* code = reinterpret_cast<uint32_t*>(target);
-    for (int k = 0; k < 4; k++)
-        if (IsPcRelative(code[k])) { Log("hook: instruction %d (0x%08x) is PC-relative, refusing", k, code[k]); return false; }
-
-    // trampoline: 4 original instructions + ldr x16,#8 ; br x16 ; .quad target+16
     void* mem = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mem == MAP_FAILED) { Log("hook: trampoline mmap RWX failed errno=%d", errno); return false; }
     uint32_t* tr = reinterpret_cast<uint32_t*>(mem);
-    memcpy(tr, code, 16);
-    tr[4] = 0x58000050; // ldr x16, #8
-    tr[5] = 0xD61F0200; // br x16
-    *reinterpret_cast<uint64_t*>(&tr[6]) = reinterpret_cast<uint64_t>(target) + 16;
-    __builtin___clear_cache(reinterpret_cast<char*>(tr), reinterpret_cast<char*>(tr + 8));
+    size_t n = 0;
+    if (!RelocatePrologue(code, tr, n)) { munmap(mem, 4096); return false; }
+    tr[n++] = 0x58000050;     // ldr x16, #8
+    tr[n++] = 0xD61F0200;     // br x16
+    *reinterpret_cast<uint64_t*>(&tr[n]) = reinterpret_cast<uint64_t>(target) + 16;
+    n += 2;
+    __builtin___clear_cache(reinterpret_cast<char*>(tr), reinterpret_cast<char*>(tr + n));
 
     uintptr_t page = reinterpret_cast<uintptr_t>(target) & ~uintptr_t(4095);
     if (mprotect(reinterpret_cast<void*>(page), 8192, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
@@ -92,6 +135,8 @@ static bool InstallInlineHook(void* target, void* detour, void** outTrampoline)
     *outTrampoline = mem;
     return true;
 }
+
+bool KMod_InstallHook(void* target, void* detour, void** original) { return InstallInlineHook(target, detour, original); }
 
 // ---------------------------------------------------------------------------------------------
 // ProcessEvent detour -> game-thread tick

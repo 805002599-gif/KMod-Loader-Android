@@ -257,6 +257,27 @@ function kmod.detect_game_version()
   return short
 end
 
+-- mod.json "platform": "Android" | "Windows" | ["Windows", "Android"]. No field = every platform (a pure Lua mod runs anywhere);
+-- a mod with native code must declare the platforms it was built for. Needs "format": 2 so a loader that does not know the
+-- field refuses the package instead of running it on the wrong platform.
+kmod.platform = kmod.platform or "Android"                -- the Windows core sets "Windows" before the loader runs
+local KNOWN_PLATFORMS = { windows = "Windows", android = "Android" }
+local function readPlatforms(def, rec)
+  local v = def.platform
+  if v == nil then return nil end
+  if type(v) == "string" then v = { v } end
+  if type(v) ~= "table" then rec.errors[#rec.errors + 1] = "platform must be a string or a list"; return nil end
+  local set, any, names = {}, false, {}
+  for _, p in ipairs(v) do
+    local k = KNOWN_PLATFORMS[tostring(p):lower()]
+    if k then if not set[k] then set[k] = true; names[#names + 1] = k end; any = true
+    else rec.warnings[#rec.warnings + 1] = "unknown platform '" .. tostring(p) .. "' ignored" end
+  end
+  if not any then rec.errors[#rec.errors + 1] = "platform lists no known platform (Windows, Android)"; return nil end
+  rec.platforms = names
+  return set
+end
+
 local function inspect(folder)
   local rec = { folder = folder, dir = P.mods .. "/" .. folder, errors = {}, warnings = {} }
   local def = {}
@@ -272,7 +293,13 @@ local function inspect(folder)
   if type(rec.id) ~= "string" or not rec.id:match(ID_PAT) then rec.errors[#rec.errors + 1] = "invalid id '" .. tostring(rec.id) .. "'"
   elseif rec.id ~= folder then rec.errors[#rec.errors + 1] = "id '" .. rec.id .. "' does not match folder '" .. folder .. "'" end
   if def.format == nil then rec.warnings[#rec.warnings + 1] = "no format field (assuming 1)"
-  elseif def.format ~= 1 then rec.errors[#rec.errors + 1] = "unsupported format " .. tostring(def.format) end
+  elseif def.format ~= 1 and def.format ~= 2 then rec.errors[#rec.errors + 1] = "unsupported format " .. tostring(def.format) end
+  local platforms = readPlatforms(def, rec)
+  if platforms and def.format ~= 2 then rec.warnings[#rec.warnings + 1] = "platform needs \"format\": 2 (older loaders would ignore it)" end
+  if platforms and not platforms[kmod.platform] then
+    rec.unsupported = "not for this platform (" .. table.concat(rec.platforms, ", ") .. " only; this is " .. kmod.platform .. ")"
+    rec.errors[#rec.errors + 1] = rec.unsupported
+  end
   rec.version = def.version and tostring(def.version) or ""
   if def.version == nil then rec.warnings[#rec.warnings + 1] = "no version" end
   rec.name = def.name or rec.id
@@ -303,9 +330,21 @@ local function inspect(folder)
     end
   end
   rec.settings = type(def.settings) == "table" and def.settings or {}
+  -- "native": "libfoo.so" -> native/arm64-v8a/libfoo.so in the package (a C++ mod, see docs). It must say which platforms it is built for.
+  if def.native ~= nil then
+    if type(def.native) ~= "string" or def.native == "" or def.native:find("[/\\]") or def.native:find("..", 1, true) then
+      rec.errors[#rec.errors + 1] = "native must be a library file name"
+    else
+      rec.native = def.native
+      if def.format ~= 2 or not rec.platforms then rec.errors[#rec.errors + 1] = 'a native mod needs "format": 2 and a "platform" list' end
+      if not kmod.exists(rec.dir .. "/native/arm64-v8a/" .. def.native) and not rec.unsupported then
+        rec.errors[#rec.errors + 1] = "native/arm64-v8a/" .. def.native .. " missing"
+      end
+    end
+  end
   if kmod.exists(rec.dir .. "/main.lua") then rec.entry = rec.dir .. "/main.lua"
   elseif kmod.exists(rec.dir .. "/Scripts/main.lua") then rec.entry = rec.dir .. "/Scripts/main.lua"; rec.warnings[#rec.warnings + 1] = "legacy Scripts/main.lua"
-  else rec.errors[#rec.errors + 1] = "main.lua missing" end
+  elseif not rec.native then rec.errors[#rec.errors + 1] = "main.lua missing" end
   rec.enabled = state.enabled[rec.id] == true
   loadValues(rec)
   return rec
@@ -317,8 +356,11 @@ function kmod.scan_mods()
     if e.dir then
       local rec = inspect(e.name)
       rec.status = kmod._status[rec.id]
-      if #rec.errors > 0 then rec.status = "error: " .. rec.errors[1]
-      elseif not rec.enabled then rec.status = (kmod.auto_disabled and kmod.auto_disabled[rec.id]) or "disabled"
+      if rec.unsupported then rec.status = rec.unsupported
+      elseif #rec.errors > 0 then rec.status = "error: " .. rec.errors[1]
+      elseif not rec.enabled then
+        rec.status = (kmod.auto_disabled and kmod.auto_disabled[rec.id]) or "disabled"
+        if rec.native and kmod.native_loaded(rec.id) then rec.status = "disabled (restart the game to unload its native code)" end
       elseif not rec.status then rec.status = "not loaded" end
       list[#list + 1] = rec
     end
@@ -382,7 +424,7 @@ local function installOne(zipPath)
   local def, perr = json.decode(readFile(tmp .. "/mod.json") or "")
   local function fail(msg) kmod.rmtree(tmp); return false, msg end
   if type(def) ~= "table" then return fail("mod.json missing or invalid " .. tostring(perr or "")) end
-  if def.format ~= 1 then return fail("format must be 1") end
+  if def.format ~= 1 and def.format ~= 2 then return fail("format must be 1 or 2") end
   if type(def.id) ~= "string" or not def.id:match(ID_PAT) then return fail("invalid or missing id") end
   if def.version == nil then return fail("version is required") end
   if def.depends ~= nil and type(def.depends) ~= "table" then return fail("depends must be a list") end
@@ -395,7 +437,7 @@ local function installOne(zipPath)
       if not ok then return fail("requires " .. id .. bad .. " (have " .. have .. ")") end
     end
   end
-  if not kmod.exists(tmp .. "/main.lua") then return fail("main.lua missing") end
+  if not kmod.exists(tmp .. "/main.lua") and type(def.native) ~= "string" then return fail("main.lua missing") end
   local target = P.mods .. "/" .. def.id
   if kmod.exists(target) then kmod.rmtree(target) end   -- upgrade = replace the package; data/ and state.json are untouched
   if not os.rename(tmp, target) then return fail("could not move package into mods/") end
@@ -549,6 +591,12 @@ local function loadOne(rec)
   if kmod.console_api then env.Console = kmod.console_api(rec) end
   env.require = makeRequire(rec, env)
   if kmod.ue4ss_api then kmod.ue4ss_api(rec, env) end                -- delayed actions, lifecycle hooks, mod management (ue4ss.lua)
+  if rec.native then                                                    -- C++ part first: it may add functions to `Native`
+    local ok, nerr = kmod.native_load(rec.id, rec.dir, rec.native)
+    if not ok then rec.status = "native error: " .. tostring(nerr); kmod._status[rec.id] = rec.status; loge(rec.id .. ": " .. rec.status); return end
+    env.Native = (kmod._natives and kmod._natives[rec.id]) or {}
+    if not rec.entry then rec.status = "loaded"; kmod._status[rec.id] = rec.status; log("loaded " .. rec.id .. " v" .. rec.version .. " (native)"); return end
+  end
   local chunk, err = loadfile(rec.entry, "t", env)
   if not chunk then rec.status = "load error: " .. tostring(err); kmod._status[rec.id] = rec.status; loge(rec.id .. ": " .. rec.status); return end
   kmod.set_activity("mod", rec.id, "load")        -- a crash while the mod's main.lua runs is blamed on it
@@ -621,6 +669,11 @@ function kmod.load_mods()
         logw(rec.id .. ": " .. rec.status)
       elseif not visit(rec) and rec.status then logw(rec.id .. ": " .. rec.status) end
     end
+  end
+  do                                                                   -- private copies of native libraries: keep only those of enabled mods
+    local keepIds = {}
+    for _, rec in ipairs(order) do if rec.native then keepIds[#keepIds + 1] = rec.id end end
+    kmod.native_prune(keepIds)
   end
   for _, rec in ipairs(order) do loadOne(rec) end
   log(string.format("%d package(s), %d loaded", #mods, #order))

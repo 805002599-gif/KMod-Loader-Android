@@ -25,3 +25,27 @@ std::string KMod_LayoutReport();
 bool KMod_MountPak(const std::string& path);           // core.cpp; game thread: mount one .pak through the engine
 void KMod_MountPendingPaks();                           // core.cpp; game thread: mount the paks in kmod/paks that have not been handled yet
 std::vector<std::pair<std::string, std::string>> KMod_PakStatus();   // (file name, status) for every .pak in kmod/paks
+
+// ---- services for native mods (lua_host.cpp / core.cpp); see native_mods.cpp ----
+struct lua_State;
+void* KMod_FindFunctionByPath(const char* path);
+void* KMod_FindClassByName(const char* name);
+void* KMod_FindFirstInstance(const char* cls);
+bool KMod_AddNativeHook(void* fn, void (*pre)(void*, void*, void*, void*), void (*post)(void*, void*, void*, void*), void* user);
+void KMod_AddNativeTick(void (*fn)(double, void*), void* user);
+void KMod_RegisterNativeLua(const char* modId, const char* name, int (*fn)(lua_State*));
+lua_State* KMod_LuaState();
+bool KMod_InstallHook(void* target, void* detour, void** original);     // core.cpp
+int Native_Load(lua_State* L);          // native_mods.cpp: kmod.native_load(id, dir, file)
+int Native_Prune(lua_State* L);         // kmod.native_prune({ids})
+int Native_IsLoaded(lua_State* L);
+void NativeMods_Shutdown();
+int NativeUi_Show(const char* specJson, void (*cb)(int, const char*, const char*, void*), void* user);   // native_ui.cpp
+void NativeUi_Set(int panel, const char* key, const char* value);
+void NativeUi_Close(int panel);
+void NativeUi_Drain();
+void* NativeUi_JavaVM();
+void* NativeUi_Env();
+void* NativeUi_AppClassLoader();
+void* NativeUi_Activity();
+void NativeUi_RunOnUi(void (*fn)(void*), void* user);

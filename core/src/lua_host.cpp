@@ -1491,7 +1491,8 @@ int G_Print(lua_State* L)
 // ---------------------------------------------------------------------------------------------
 // Hooks, timers, queued work
 // ---------------------------------------------------------------------------------------------
-struct HookEntry { int id; int preRef; int postRef; std::string owner; };
+using NativeHookCb = void (*)(void*, void*, void*, void*);
+struct HookEntry { int id; int preRef; int postRef; std::string owner; NativeHookCb npre = nullptr; NativeHookCb npost = nullptr; void* nuser = nullptr; };
 std::unordered_map<UFunction*, std::vector<HookEntry>> g_hooks;
 // HasHook runs for EVERY Blueprint function call (see the ProcessInternal detour): a bit filter answers "no" without a hash lookup.
 uint64_t g_hookBloom[1024] = {};
@@ -1663,6 +1664,7 @@ void RunHooks(UObject* self, UFunction* fn, void* parms, bool post, void* result
     std::vector<HookEntry> copy = it->second;   // callbacks may unregister
     for (const HookEntry& e : copy)
     {
+        if (NativeHookCb ncb = post ? e.npost : e.npre) { ncb(self, parms, result, e.nuser); continue; }     // a native mod's hook
         int ref = post ? e.postRef : e.preRef;
         if (ref == LUA_NOREF || ref == LUA_REFNIL) continue;
         lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
@@ -2190,6 +2192,9 @@ void LuaHost_Init()
     lua_pushcfunction(L, Kmod_ScriptHookStats); lua_setfield(L, -2, "script_hook_stats");
     lua_pushcfunction(L, Kmod_ScriptDiag); lua_setfield(L, -2, "script_diag");
     lua_pushcfunction(L, Kmod_NativeHookStats); lua_setfield(L, -2, "native_hook_stats");
+    lua_pushcfunction(L, Native_Load); lua_setfield(L, -2, "native_load");
+    lua_pushcfunction(L, Native_Prune); lua_setfield(L, -2, "native_prune");
+    lua_pushcfunction(L, Native_IsLoaded); lua_setfield(L, -2, "native_loaded");
     lua_pushcfunction(L, [](lua_State* S) -> int { lua_pushnumber(S, FastNow()); return 1; }); lua_setfield(L, -2, "now");
     lua_pushcfunction(L, [](lua_State* S) -> int { lua_pushboolean(S, KMod_DetectLayout(lua_toboolean(S, 1) != 0)); return 1; }); lua_setfield(L, -2, "detect_layout");
     lua_pushcfunction(L, [](lua_State* S) -> int { lua_pushstring(S, KMod_LayoutReport().c_str()); return 1; }); lua_setfield(L, -2, "layout_report");
@@ -2355,10 +2360,13 @@ void LuaHost_FastTick(double now)
     if (g_anyFastWatch && now >= g_nextFastScan) { g_nextFastScan = now + 0.016; ScanNewObjects(); }
 }
 
+static void RunNativeTicks(double now);
+
 void LuaHost_Tick(double now)
 {
     if (!L_) return;
     g_now = now;
+    RunNativeTicks(now);
 
     // due timers (copy: callbacks may add timers)
     std::vector<Timer> due, keep;
@@ -2390,3 +2398,43 @@ void LuaHost_Tick(double now)
         if (now >= g_nextConsoleCheck) { g_nextConsoleCheck = now + 0.5; CheckConsole(); }
     }
 }
+
+
+// ---------------------------------------------------------------------------------------------
+// Services for native mods (native_mods.cpp). Everything here runs on the game thread.
+// ---------------------------------------------------------------------------------------------
+void* KMod_FindFunctionByPath(const char* path) { return FindByPath(path, true); }
+void* KMod_FindClassByName(const char* name) { return FindClassCached(name); }
+void* KMod_FindFirstInstance(const char* cls) { return Rf::FindFirst(cls); }
+
+bool KMod_AddNativeHook(void* fn, void (*pre)(void*, void*, void*, void*), void (*post)(void*, void*, void*, void*), void* user)
+{
+    UFunction* f = static_cast<UFunction*>(fn);
+    if (!f) return false;
+    std::string note;
+    KMod_EnsureNativeHook(f, note);
+    HookEntry e{g_nextHookId++, LUA_NOREF, LUA_NOREF, std::string()};
+    e.npre = pre; e.npost = post; e.nuser = user;
+    g_hooks[f].push_back(e);                                   // owner "": a mod reload does not remove it
+    uint32_t b = BloomBit(f); g_hookBloom[b >> 6] |= 1ull << (b & 63);
+    return true;
+}
+
+static std::vector<std::pair<void (*)(double, void*), void*>> g_nativeTicks;
+void KMod_AddNativeTick(void (*fn)(double, void*), void* user) { g_nativeTicks.emplace_back(fn, user); }
+static void RunNativeTicks(double now) { for (auto& t : g_nativeTicks) t.first(now, t.second); NativeUi_Drain(); }
+
+// Native Lua function of a mod: kmod._natives[modId][name]
+void KMod_RegisterNativeLua(const char* modId, const char* name, int (*fn)(lua_State*))
+{
+    if (!L_) return;
+    int top = lua_gettop(L_);
+    lua_getglobal(L_, "kmod");
+    lua_getfield(L_, -1, "_natives");
+    if (!lua_istable(L_, -1)) { lua_pop(L_, 1); lua_newtable(L_); lua_pushvalue(L_, -1); lua_setfield(L_, -3, "_natives"); }
+    lua_getfield(L_, -1, modId);
+    if (!lua_istable(L_, -1)) { lua_pop(L_, 1); lua_newtable(L_); lua_pushvalue(L_, -1); lua_setfield(L_, -3, modId); }
+    lua_pushcfunction(L_, fn); lua_setfield(L_, -2, name);
+    lua_settop(L_, top);
+}
+lua_State* KMod_LuaState() { return L_; }
