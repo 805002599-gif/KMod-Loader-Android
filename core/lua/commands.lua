@@ -103,7 +103,10 @@ end
 local function builtin(name, fn, help, usage) register(name, fn, { help = help, usage = usage }, "") end
 
 local function findMod(id)
-  for _, rec in ipairs(kmod.mods or {}) do if rec.id == id then return rec end end
+  for pass = 1, 2 do
+    for _, rec in ipairs(kmod.mods or {}) do if rec.id == id then return rec end end
+    if pass == 1 then kmod.refresh_mods() end          -- the mod may have been copied in after the last scan
+  end
 end
 
 -- ------------------------------------------------------------------ built-in commands
