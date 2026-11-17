@@ -164,7 +164,48 @@ static UFunction* g_hbFn = nullptr;
 // function runs, and (post hook) read the return value. Native functions keep going through the ProcessEvent hook.
 // FFrame (UE 5.x): FOutputDevice base (16 bytes), Node, Object, Code, Locals.
 // ---------------------------------------------------------------------------------------------
-static const int kFrameNode = 0x10, kFrameObject = 0x18, kFrameLocals = 0x28, kCodeOff = 0x20;
+// FFrame field offsets. The defaults are UE 5.x's; they are re-learned at run time from the first ProcessEvent calls of Blueprint
+// functions: ProcessEvent builds the frame itself, so we know what it must contain (function, object, parameter block, the
+// function's bytecode pointer) and look for those values in the frame the interpreter receives.
+static int kFrameNode = 0x10, kFrameObject = 0x18, kFrameLocals = 0x28, kCodeOff = 0x20;
+static bool g_frameLearned = false;
+struct FrameExpect { UFunction* fn = nullptr; UObject* self = nullptr; void* parms = nullptr; uintptr_t script = 0; uint64_t head = 0; bool hasHead = false; };
+static thread_local FrameExpect t_expect;
+static int g_fvNode[26], g_fvObj[26], g_fvLoc[26], g_fvCode[26], g_fSamples = 0;
+
+static int g_fHeadSamples = 0;
+
+static void LearnFrame(const uint8_t* st)
+{
+    FrameExpect e = t_expect; t_expect = FrameExpect();
+    if (!e.fn || g_frameLearned) return;
+    g_fSamples++;
+    if (e.hasHead) g_fHeadSamples++;
+    for (int k = 0; k < 26; k++)
+    {
+        uintptr_t w = *reinterpret_cast<const uintptr_t*>(st + k * 8);
+        g_fvNode[k] += w == (uintptr_t)e.fn; g_fvObj[k] += w == (uintptr_t)e.self;
+        g_fvCode[k] += (e.script && w == e.script);
+        // Locals: ProcessEvent copies the parameters into the frame's own block, so look for a pointer to memory that starts with them
+        uint64_t first = 0;
+        if (e.hasHead && w > 0x10000 && w != (uintptr_t)e.parms && Resolver_SafeRead(w, &first, 8) && first == e.head) g_fvLoc[k]++;
+    }
+    if (g_fSamples < 60 || (g_fHeadSamples < 40 && g_fSamples < 600)) return;
+    auto best = [&](const int* v, int& off) { int b = 0; for (int k = 1; k < 26; k++) if (v[k] > v[b]) b = k; off = b * 8; return v[b]; };
+    int n, o, l, c;
+    int vn = best(g_fvNode, n), vo = best(g_fvObj, o), vl = best(g_fvLoc, l), vc = best(g_fvCode, c);
+    bool core3 = vn * 10 >= g_fSamples * 9 && vo * 10 >= g_fSamples * 9 && n != o;
+    bool loc = g_fHeadSamples >= 40 && vl * 10 >= g_fHeadSamples * 8 && l != n && l != o;
+    bool code = vc * 10 >= g_fSamples * 8 && c != n && c != o && c != l;
+    if (core3) { kFrameNode = n; kFrameObject = o; }
+    if (core3 && loc) kFrameLocals = l;
+    if (core3 && code) kCodeOff = c;
+    g_frameLearned = true;
+    KLog(core3 && loc && code ? KLOG_INFO : KLOG_WARN, "core",
+         "script hook: FFrame offsets (learned: Node %d, Object %d, Locals %d, Code %d): Node +0x%x Object +0x%x Locals +0x%x Code +0x%x; votes %d/%d/%d/%d of %d (%d with parameters)",
+         core3, core3, core3 && loc, core3 && code, kFrameNode, kFrameObject, kFrameLocals, kCodeOff, vn, vo, vl, vc, g_fSamples, g_fHeadSamples);
+}
+
 using ProcessInternalFn = void (*)(UObject*, void*, void*);
 static ProcessInternalFn g_origPI = nullptr;
 static std::atomic<bool> g_scriptHookOk{false};          // installed and the frame layout was confirmed
@@ -181,6 +222,7 @@ static void HookedProcessInternal(UObject* ctx, void* stack, void* result)
     if (!g_scriptHookOk.load(std::memory_order_relaxed) && g_piBroken.load()) { g_origPI(ctx, stack, result); return; }
     if (t_gameThread == 1 && !t_busy && stack)
     {
+        if (t_expect.fn) LearnFrame(reinterpret_cast<const uint8_t*>(stack));
         ctx = *reinterpret_cast<UObject**>(reinterpret_cast<uint8_t*>(stack) + kFrameObject);      // the interpreter's own Context
         UFunction* fn = *reinterpret_cast<UFunction**>(reinterpret_cast<uint8_t*>(stack) + kFrameNode);
         if (g_piChecked.load(std::memory_order_relaxed) < 2000)          // confirm the frame layout on the first calls
@@ -345,7 +387,14 @@ static void HookedProcessEvent(UObject* self, UFunction* fn, void* parms)
                         !(g_scriptHookOk.load(std::memory_order_relaxed) && (Rf::FuncFlagsOf(fn) & 0x400) == 0);
     if (hooked) { t_busy = true; LuaHost_PreHook(self, fn, parms); t_busy = false; }
 
+    if (!g_frameLearned && t_gameThread == 1 && g_scriptHookOk.load(std::memory_order_relaxed) && fn && (Rf::FuncFlagsOf(fn) & 0x400) == 0 && parms)
+    {
+        t_expect.fn = fn; t_expect.self = self; t_expect.parms = parms;
+        t_expect.hasHead = Rf::ParamSizeOf(fn) >= 8 && Resolver_SafeRead(reinterpret_cast<uintptr_t>(parms), &t_expect.head, 8) && t_expect.head > 0x10000;   // an object pointer or similar: not a common value
+        t_expect.script = Rf::At<uintptr_t>(fn, Rf::L.ustruct_script);          // UStruct::Script (a TArray): its data pointer is the frame's Code at entry
+    }
     g_origPE(self, fn, parms);
+    t_expect = FrameExpect();
 
     if (t_busy) return;
     if (t_gameThread != 1) return;
@@ -395,7 +444,7 @@ static uint64_t HookedPakMount(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a
     if (path)
     {
         static const std::string prefix = KModRoot() + "/paks/";
-        static const std::string alt = "/sdcard/Android/media/com.android1939.kardsapk/kmod/paks/";
+        static const std::string alt = "/storage/emulated/0/Android/media/" + KPackageName() + "/kmod/paks/";
         int32_t* order = reinterpret_cast<int32_t*>(a1 + 8);
         std::string shown;
         for (int i = 0; i < 200 && path[i]; i++) shown += (path[i] < 128 ? (char)path[i] : '?');
@@ -805,6 +854,91 @@ static UObject* CurrentWorld()
     return vp ? Rf::ObjProp(vp, "World") : nullptr;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Canaries: the layouts that come from the SDK compiled into this core (object table geometry, FString, FText, TArray) are checked
+// against the running game once the engine is up. A wrong object table or FString layout would make every mod read garbage, so those
+// two block the mods (like a reflection layout mismatch); FText and TArray only warn (the features that use them report errors).
+// ---------------------------------------------------------------------------------------------
+static std::string g_canaryReport;
+
+static void RunCanaries()
+{
+    std::string rep;
+    bool block = false;
+
+    // 1. object table: every object's own Index must equal its slot (validates Objects/chunk layout, FUObjectItem stride and UObject.Index)
+    {
+        TUObjectArray* arr = InSDKUtils::GetGObjects();
+        int total = 0, good = 0;
+        int32_t n = arr ? arr->Num() : 0;
+        int32_t step = n > 4000 ? n / 4000 : 1;
+        for (int32_t i = 0; i < n; i += step)
+        {
+            FUObjectItem* it = ObjRef::ItemAt(i);
+            if (!it || !it->Object) continue;
+            total++;
+            if (Rf::IndexOf(it->Object) == i) good++;
+        }
+        bool ok = total >= 200 && good * 100 >= total * 99;
+        char b[160]; snprintf(b, sizeof(b), "object table %s (%d/%d objects at their own index)", ok ? "ok" : "WRONG", good, total);
+        rep += b; if (!ok) block = true;
+    }
+
+    // 2. FString: concatenate through the engine and read the result back
+    {
+        static const char16_t kAb[] = u"ab", kCd[] = u"cd";
+        Rf::Args a = Rf::Prepare("KismetStringLibrary", "Concat_StrStr");
+        a.Set("A", FString(const_cast<TCHAR*>(reinterpret_cast<const TCHAR*>(kAb)), 3, 3));
+        a.Set("B", FString(const_cast<TCHAR*>(reinterpret_cast<const TCHAR*>(kCd)), 3, 3));
+        bool ok = false;
+        if (a.ok() && a.Call(Rf::CdoFor("KismetStringLibrary"))) ok = a.Get<FString>("ReturnValue").ToString() == "abcd";
+        rep += std::string("; FString ") + (ok ? "ok" : "WRONG");
+        if (!ok) block = true;
+    }
+
+    // 3. FText: string -> text -> string through the engine
+    {
+        static const char16_t kT[] = u"kmod";
+        Rf::Args a = Rf::Prepare("KismetTextLibrary", "Conv_StringToText");
+        a.Set("InString", FString(const_cast<TCHAR*>(reinterpret_cast<const TCHAR*>(kT)), 5, 5));
+        bool ok = false;
+        if (a.ok() && a.Call(Rf::CdoFor("KismetTextLibrary")))
+        {
+            FText t = a.Get<FText>("ReturnValue");
+            Rf::Args b = Rf::Prepare("KismetTextLibrary", "Conv_TextToString");
+            b.Set("InText", t);
+            if (b.ok() && b.Call(Rf::CdoFor("KismetTextLibrary"))) ok = b.Get<FString>("ReturnValue").ToString() == "kmod";
+        }
+        rep += std::string("; FText ") + (ok ? "ok" : "WRONG (FText properties may misbehave)");
+    }
+
+    // 4. TArray: GameInstance.LocalPlayers is a short array of valid objects
+    {
+        bool ok = false;
+        if (UObject* gi = Rf::FindFirst("GameInstance"))
+            if (FProperty* p = Rf::FindProp(reinterpret_cast<UStruct*>(Rf::ClassOf(gi)), "LocalPlayers"))
+            {
+                struct Raw { void* data; int32_t num, max; };
+                const Raw* r = &Rf::At<Raw>(gi, Rf::OffsetOf(p));
+                if (r->data && r->num >= 1 && r->num <= 16 && r->max >= r->num)
+                {
+                    UObject* first = *static_cast<UObject**>(r->data);
+                    ok = first && Rf::ClassOf(first) && Rf::FindClass("LocalPlayer") && Rf::IsA(first, Rf::FindClass("LocalPlayer"));
+                }
+            }
+        rep += std::string("; TArray ") + (ok ? "ok" : "WRONG (array properties may misbehave)");
+    }
+
+    g_canaryReport = rep;
+    KLog(block ? KLOG_ERROR : KLOG_INFO, "layout", "canaries: %s%s", rep.c_str(), block ? " -> mods are NOT loaded" : "");
+    if (block)
+    {
+        g_layoutMismatch = true;
+        std::lock_guard<std::mutex> g(g_layoutMu);
+        g_layoutReport += " | canaries: " + rep + " -> mods are NOT loaded (the SDK layouts compiled into this core do not match the game).";
+    }
+}
+
 // Runs on the game thread (throttled ~20 Hz) from the ProcessEvent hook.
 static void OnGameTick()
 {
@@ -820,6 +954,7 @@ static void OnGameTick()
     }
     if (!CurrentWorld()) return;
     EnsureScriptHook(InSDKUtils::GetImageBase());          // once, with the engine layout already adopted
+    { static bool canaries = false; if (!canaries) { canaries = true; RunCanaries(); } }       // before any mod runs
 
     double now = NowSec();
     if (g_readySince == 0) { g_readySince = now; Log("engine ready"); KMod_MountPendingPaks(); }
@@ -870,9 +1005,21 @@ static void InitThread()
     KMod_DetectLayout(false);        // verify the engine layout against the SDK in this core (cached per game build)
 }
 
+// The folders a user puts files into must exist as soon as the game has started once (not only when a feature first needs them):
+// kmod/mods (mod folders and .kmod packages), kmod/paks (pak mods), kmod/data (mod data).
+static void EnsureUserFolders()
+{
+    std::string root = KModRoot();
+    std::string path;
+    for (size_t i = 1; i <= root.size(); i++)
+        if (i == root.size() || root[i] == '/') mkdir(root.substr(0, i).c_str(), 0777);
+    for (const char* sub : {"mods", "paks", "data"}) mkdir((root + "/" + sub).c_str(), 0777);
+}
+
 __attribute__((constructor)) static void CoreMain()
 {
     KLogInit();
+    EnsureUserFolders();
     KBoot_Init();
     NetRedirect_Start();          // before anything else: the game reads its server URLs early
     Log("libkmodcore loaded");

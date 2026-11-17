@@ -1,1 +1,1 @@
-{"format":2,"platform":["Android"],"native":"libfloat_button.so","id":"float_button","name":"Float Button","version":"0.1.0","author":"kmod","description":"A draggable floating button drawn with Android views from C++ (own Java class through JNI).","depends":["kmod>=0.2.0"]}
+{"format":2,"platform":["Android"],"native":"libfloat_button.so","id":"float_button","name":"Float Button","version":"0.1.0","author":"kmod","description":"A draggable floating button drawn with Android views from C++ (own Java class through JNI).","depends":["kmod>=0.3.0"]}

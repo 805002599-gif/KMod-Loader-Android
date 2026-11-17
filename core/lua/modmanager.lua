@@ -189,14 +189,14 @@ end
 local function refresh()
   if not ui.style then captureStyle() end
   pcall(function() ui.scaleBox:SetUserSpecifiedScale(ui.style.scaleBox.UserSpecifiedScale) end)   -- follow the UI-scale option
-  if kmod.install_inbox() > 0 then kmod.reload_mods() end       -- packages dropped into kmod/inbox
+  if kmod.sync_mods() > 0 then kmod.reload_mods() end          -- mods dropped into kmod/mods
   ui.tab:SetText(kmod.t("mods"))
   ui.scroll:ClearChildren()
   header(kmod.t("mods"), "title")
   ui.ctrls = {}
   local mods = kmod.refresh_mods()
   languageRow(section(kmod.t("language")))
-  if #mods == 0 then row(section(kmod.t("no_mods")), kmod.t("no_mods_hint")) end
+  if #mods == 0 then section(kmod.t("no_mods")); description(kmod.t("no_mods_hint")) end      -- same text block as a mod's description (a row label is squeezed small)
   local pending = {}                                           -- SetText on text blocks must run after they are parented
   for _, rec in ipairs(mods) do
     local box = section(kmod.mod_title(rec))

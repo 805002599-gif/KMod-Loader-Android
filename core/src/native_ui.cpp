@@ -131,8 +131,8 @@ bool EnsureBridge()
     // the dex goes to a private, read-only file (Android refuses to load writable dex files)
     uint32_t h = 2166136261u;
     for (unsigned i = 0; i < kUiBridgeDexSize; i++) h = (h ^ kUiBridgeDex[i]) * 16777619u;
-    std::string dir = std::string("/data/data/") + kPackageName + "/files/kmod";
-    mkdir((std::string("/data/data/") + kPackageName + "/files").c_str(), 0771);
+    std::string dir = std::string("/data/data/") + KPackageName() + "/files/kmod";
+    mkdir((std::string("/data/data/") + KPackageName() + "/files").c_str(), 0771);
     mkdir(dir.c_str(), 0771);
     char name[64]; snprintf(name, sizeof(name), "/uibridge-%08x.dex", h);
     std::string path = dir + name;

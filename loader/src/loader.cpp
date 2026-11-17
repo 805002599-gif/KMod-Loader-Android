@@ -19,11 +19,19 @@ static void Describe(const char* where)
     LOGI("%s: pid=%d process=%s", where, (int)getpid(), cmd);
 }
 
+// The process name is the app's package name (secondary processes have a ":suffix"). Nothing here hardcodes the package.
+static const char* ProcessName()
+{
+    static char cmd[256];
+    if (!cmd[0])
+        if (FILE* f = fopen("/proc/self/cmdline", "r")) { fread(cmd, 1, sizeof(cmd) - 1, f); fclose(f); }
+    return cmd;
+}
+
 static bool IsMainProcess()
 {
-    char cmd[256] = {};
-    if (FILE* f = fopen("/proc/self/cmdline", "r")) { fread(cmd, 1, sizeof(cmd) - 1, f); fclose(f); }
-    return strcmp(cmd, "com.android1939.kardsapk") == 0;
+    const char* cmd = ProcessName();
+    return cmd[0] != 0 && strchr(cmd, ':') == nullptr;
 }
 
 static bool CopyFile(const char* from, const char* to)
@@ -40,7 +48,7 @@ static bool CopyFile(const char* from, const char* to)
 // (so core changes need only an adb push + restart, not a 1.2 GB reinstall). Otherwise load the bundled core.
 static void LoadCore()
 {
-    const char* pkg = "com.android1939.kardsapk";
+    const char* pkg = ProcessName();
     char src[256], dir[256], dst[300];
     snprintf(src, sizeof(src), "/sdcard/Android/media/%s/kmod/dev/libkmodcore.so", pkg);
     snprintf(dir, sizeof(dir), "/data/data/%s/files/kmod", pkg);

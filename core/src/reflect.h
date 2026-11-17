@@ -29,6 +29,8 @@ struct Layout
     int ufield_next = offsetof(UField, Next);
     int ustruct_super = offsetof(UStruct, SuperStruct), ustruct_children = offsetof(UStruct, Children),
         ustruct_props = offsetof(UStruct, ChildProperties), ustruct_size = offsetof(UStruct, Size);
+    int ustruct_minalign = offsetof(UStruct, Size) + 4;               // reported by the detector ("UStruct.MinAlignment")
+    int ustruct_script = offsetof(UStruct, Size) + 8;                 // UStruct::Script (TArray<uint8>): follows MinAlignment; verified when frames are learned
     int ufunc_flags = offsetof(UFunction, FunctionFlags), ufunc_exec = offsetof(UFunction, ExecFunction), ufunc_paramsize = 0xB6;
     int uclass_cdo = offsetof(UClass, ClassDefaultObject);
     // FField / FFieldClass

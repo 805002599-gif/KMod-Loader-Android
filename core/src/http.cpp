@@ -283,10 +283,10 @@ int Http_Request(lua_State* L)
     {
         o.saveTo = lua_tostring(L, -1);
         bool ok = false;
-        for (const char* sub : {"/data/", "/inbox/", "/paks/", "/art/"})
+        for (const char* sub : {"/data/", "/mods/", "/paks/", "/art/"})
             if (o.saveTo.compare(0, (KModRoot() + sub).size(), KModRoot() + sub) == 0) ok = true;
         if (!ok || o.saveTo.find("..") != std::string::npos)
-            return luaL_error(L, "Http: files can only be saved inside kmod/data, kmod/inbox, kmod/paks or kmod/art");
+            return luaL_error(L, "Http: files can only be saved inside kmod/data, kmod/mods, kmod/paks or kmod/art");
         if (o.maxBytes == (8u << 20)) o.maxBytes = 512u << 20;        // downloads may be big unless the mod set its own limit
     }
     lua_pop(L, 1);

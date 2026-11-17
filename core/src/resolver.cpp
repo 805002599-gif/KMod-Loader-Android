@@ -305,3 +305,5 @@ std::string Resolver_BuildKey()
     snprintf(b, sizeof(b), "%lx-%08lx", (unsigned long)(g_modHi - g_modLo), (unsigned long)crc);
     return b;
 }
+
+bool Resolver_SafeRead(uintptr_t addr, void* out, size_t n) { return SafeRead(addr, out, n); }

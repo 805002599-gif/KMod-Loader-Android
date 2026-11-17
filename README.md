@@ -10,6 +10,8 @@ A Lua mod loader for the card game KARDS on Android. Mods are Lua scripts that r
 
 ## Not included
 
+**Installer:** `installer/` is an Android app (kmod installer) that checks an installed Unreal game, injects the loader and installs the result on the phone. See the [releases](https://github.com/CCB-TEAM/KMod-Loader-Android/releases) and the documentation.
+
 This repository contains only the loader's source. It does **not** contain the game, a patched APK, the game's C++ SDK dump, or any signing key. You need your own KARDS APK from an official source and your own SDK dump (Dumper-7 / MobileDumper-7); see the "Building the loader" page of the documentation. Do not distribute patched APKs.
 
 ## Layout

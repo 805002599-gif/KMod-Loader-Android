@@ -23,3 +23,5 @@ void Resolver_FindBytes(const void* pat, size_t n, std::vector<uintptr_t>& hits)
 
 // Heap scan (about a second). Returns false when the pak layer could not be identified (other game build).
 bool Resolver_ResolvePak(uintptr_t base, PakAddrs& out, std::string& report);
+
+bool Resolver_SafeRead(uintptr_t addr, void* out, size_t n);        // reads memory without crashing on unmapped addresses

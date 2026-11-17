@@ -154,7 +154,7 @@ void KLogInit()
     if (g_file) g_crashFd = dup(fileno(g_file));
 
     WriteLine(KLOG_INFO, "kmod", std::string("=== kmod loader ") + KMOD_VERSION + " (" + KMOD_FLAVOR + ") started ===");
-    WriteLine(KLOG_INFO, "kmod", "package " + std::string(kPackageName) + ", pid " + std::to_string(getpid()));
+    WriteLine(KLOG_INFO, "kmod", "package " + KPackageName() + ", pid " + std::to_string(getpid()));
     WriteLine(KLOG_INFO, "kmod", "device " + Prop("ro.product.manufacturer") + " " + Prop("ro.product.model") + ", Android " +
                                       Prop("ro.build.version.release") + " (API " + Prop("ro.build.version.sdk") + "), abi " + Prop("ro.product.cpu.abi"));
     WriteLine(KLOG_INFO, "kmod", "data dir " + KModRoot());

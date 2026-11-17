@@ -18,7 +18,7 @@ Key* Keys(size_t& n)
         {"UObject.Flags", &L.uobj_flags}, {"UObject.Index", &L.uobj_index}, {"UObject.Class", &L.uobj_class},
         {"UObject.Name", &L.uobj_name}, {"UObject.Outer", &L.uobj_outer},
         {"UField.Next", &L.ufield_next},
-        {"UStruct.SuperStruct", &L.ustruct_super}, {"UStruct.Children", &L.ustruct_children},
+        {"UStruct.SuperStruct", &L.ustruct_super}, {"UStruct.MinAlignment", &L.ustruct_minalign}, {"UStruct.Children", &L.ustruct_children},
         {"UStruct.ChildProperties", &L.ustruct_props}, {"UStruct.Size", &L.ustruct_size},
         {"UFunction.FunctionFlags", &L.ufunc_flags}, {"UFunction.ExecFunction", &L.ufunc_exec}, {"UFunction.ParamSize", &L.ufunc_paramsize},
         {"UClass.ClassDefaultObject", &L.uclass_cdo},

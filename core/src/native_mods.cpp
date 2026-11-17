@@ -39,7 +39,7 @@ struct LoadedMod
 std::map<std::string, std::unique_ptr<LoadedMod>> g_mods;
 std::string g_registering;                                  // mod id while its kmod_start runs (register_lua_function)
 
-std::string PrivateRoot() { return std::string("/data/data/") + kPackageName + "/files/kmod/native"; }
+std::string PrivateRoot() { return std::string("/data/data/") + KPackageName() + "/files/kmod/native"; }
 
 void MkdirP(const std::string& path)
 {
@@ -239,18 +239,29 @@ int Native_Load(lua_State* L)
     if (!SafeName(id) || !SafeName(file)) return Fail(L, "bad native library name");
     std::string src = dir + "/native/arm64-v8a/" + file;
     std::string privDir = PrivateRoot() + "/" + id;
-    MkdirP(privDir);
+    std::string libPath = privDir + "/" + file;
     std::string err;
-    KBoot_SetActivity("mod", id.c_str(), "native copy");
-    bool synced = SyncFile(src, privDir + "/" + file, err);
-    KBoot_SetActivity(nullptr, nullptr, nullptr);
-    if (!synced) return Fail(L, err);
+    if (dir.compare(0, KPrivateRoot().size() + 1, KPrivateRoot() + "/") == 0)
+    {
+        libPath = src;                                       // the mod was already mirrored into private storage (kmod.sync_mods): load it in place
+        struct stat st;
+        if (stat(src.c_str(), &st) != 0) return Fail(L, "missing native/arm64-v8a/" + file);
+        MkdirP(privDir);
+    }
+    else
+    {
+        MkdirP(privDir);
+        KBoot_SetActivity("mod", id.c_str(), "native copy");
+        bool synced = SyncFile(src, libPath, err);
+        KBoot_SetActivity(nullptr, nullptr, nullptr);
+        if (!synced) return Fail(L, err);
+    }
 
     auto m = std::make_unique<LoadedMod>();
     m->id = id; m->dir = dir; m->data = KModRoot() + "/data/" + id;
     MkdirP(m->data);
     KBoot_SetActivity("mod", id.c_str(), "native load");                 // a crash while loading or starting is blamed on the mod
-    m->handle = dlopen((privDir + "/" + file).c_str(), RTLD_NOW | RTLD_LOCAL);
+    m->handle = dlopen(libPath.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!m->handle)
     {
         const char* de = dlerror();

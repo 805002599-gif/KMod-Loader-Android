@@ -195,7 +195,29 @@ constexpr const char* MT_OBJECT = "kmod.UObject";
 constexpr const char* MT_PARAMS = "kmod.Params";
 
 // FUObjectItem::SerialNumber changes whenever a slot is reused: (pointer, index, serial) identifies one object for its whole life
-inline int32_t SlotSerial(FUObjectItem* it) { return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 0x10); }
+// FUObjectItem::SerialNumber. 0x10 is UE 5's offset; before it is trusted the values there are sampled: serial numbers are small
+// non-negative integers, an object pointer or flags word in that place would not look like that. A layout that fails the check
+// reports 0 for every object (the "no serial yet" case), so a stale handle is then only noticed through the pointer check.
+bool g_serialChecked = false, g_serialOk = true;
+inline int32_t SlotSerial(FUObjectItem* it)
+{
+    if (!g_serialChecked)
+    {
+        g_serialChecked = true;
+        int good = 0, total = 0;
+        TUObjectArray* a = InSDKUtils::GetGObjects();
+        for (int32_t i = 0; a && i < a->Num() && total < 4000; i += 7)
+        {
+            FUObjectItem* x = ObjRef::ItemAt(i);
+            if (!x || !x->Object) continue;
+            int32_t v = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(x) + 0x10);
+            total++; if (v >= 0 && v < 0x1000000) good++;
+        }
+        g_serialOk = total < 100 || good * 100 >= total * 98;
+        KLog(g_serialOk ? KLOG_INFO : KLOG_WARN, "core", "object serial numbers: %s (%d of %d sampled values look like serial numbers)", g_serialOk ? "layout confirmed" : "layout NOT confirmed, serial checks off", good, total);
+    }
+    return g_serialOk ? *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(it) + 0x10) : 0;
+}
 struct LuaObj { UObject* p; int32_t idx; int32_t serial; };
 struct LuaParams { UFunction* fn; uint8_t* parms; uint8_t* result; };   // result: only for script-function hooks (the frame's Result pointer)
 
@@ -259,7 +281,7 @@ int AlignOfProp(FProperty* p)
     case T_Int16: case T_UInt16: return 2;
     case T_Int: case T_UInt32: case T_Float: case T_Name: case T_Weak: return 4;
     case T_Enum: return std::max(1, std::min(8, (int)Rf::ElemSizeOf(p)));
-    case T_Struct: { UStruct* s = Rf::StructOf(p); int a = s ? Rf::At<int32_t>(s, Rf::L.ustruct_size + 4) : 8; return (a > 0 && a <= 16) ? a : 8; }
+    case T_Struct: { UStruct* s = Rf::StructOf(p); int a = s ? Rf::At<int32_t>(s, Rf::L.ustruct_minalign) : 8; return (a > 0 && a <= 16) ? a : 8; }
     default: return 8;
     }
 }
@@ -1920,10 +1942,76 @@ int Ccb_Unzip(lua_State* L)    // ok, err = kmod.unzip(zipPath, destDir)
 int Ccb_Rmtree(lua_State* L)   // only inside <root>/
 {
     std::string path = luaL_checkstring(L, 1);
-    std::string root = KModRoot() + "/";
-    if (path.compare(0, root.size(), root) != 0 || path.find("..") != std::string::npos) return luaL_error(L, "rmtree: refusing path %s", path.c_str());
+    std::string root = KModRoot() + "/", priv = KPrivateRoot() + "/";
+    if ((path.compare(0, root.size(), root) != 0 && path.compare(0, priv.size(), priv) != 0) || path.find("..") != std::string::npos)
+        return luaL_error(L, "rmtree: refusing path %s", path.c_str());
     RmTree(path);
     return 0;
+}
+
+// kmod.copytree(src, dst) -> true | false, err: copies a directory tree (dst is created; files are overwritten)
+bool CopyTreeImpl(const std::string& src, const std::string& dst, std::string& err)
+{
+    struct stat st;
+    if (stat(src.c_str(), &st) != 0) { err = "missing " + src; return false; }
+    if (S_ISDIR(st.st_mode))
+    {
+        mkdir(dst.c_str(), 0777);
+        DIR* d = opendir(src.c_str());
+        if (!d) { err = "cannot read " + src; return false; }
+        std::vector<std::string> names;
+        while (dirent* e = readdir(d)) { std::string n = e->d_name; if (n != "." && n != "..") names.push_back(n); }
+        closedir(d);
+        for (auto& n : names) if (!CopyTreeImpl(src + "/" + n, dst + "/" + n, err)) return false;
+        return true;
+    }
+    FILE* in = fopen(src.c_str(), "rb");
+    if (!in) { err = "cannot read " + src; return false; }
+    FILE* out = fopen(dst.c_str(), "wb");
+    if (!out) { fclose(in); err = "cannot write " + dst; return false; }
+    char buf[1 << 16]; size_t n; bool ok = true;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+    fclose(in);
+    if (fclose(out) != 0) ok = false;
+    if (!ok) err = "copy failed (storage full?): " + dst;
+    return ok;
+}
+
+int Ccb_CopyTree(lua_State* L)
+{
+    std::string src = luaL_checkstring(L, 1), dst = luaL_checkstring(L, 2), err;
+    std::string priv = KPrivateRoot() + "/", root = KModRoot() + "/";
+    if ((dst.compare(0, priv.size(), priv) != 0 && dst.compare(0, root.size(), root) != 0) || dst.find("..") != std::string::npos)
+        return luaL_error(L, "copytree: refusing destination %s", dst.c_str());
+    if (CopyTreeImpl(src, dst, err)) { lua_pushboolean(L, 1); return 1; }
+    lua_pushboolean(L, 0); lua_pushstring(L, err.c_str());
+    return 2;
+}
+
+// kmod.tree_stamp(path) -> string that changes when a file or anything under a directory changes (names, sizes, modification times)
+void StampWalk(const std::string& path, const std::string& rel, uint64_t& h, int depth)
+{
+    auto mix = [&](const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } h ^= 0xFF; h *= 1099511628211ull; };
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return;
+    mix(rel); mix(std::to_string((long long)st.st_size)); mix(std::to_string((long long)st.st_mtime));
+    if (!S_ISDIR(st.st_mode) || depth > 16) return;
+    DIR* d = opendir(path.c_str());
+    if (!d) return;
+    std::vector<std::string> names;
+    while (dirent* e = readdir(d)) { std::string n = e->d_name; if (n != "." && n != "..") names.push_back(n); }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+    for (auto& n : names) StampWalk(path + "/" + n, rel + "/" + n, h, depth + 1);
+}
+
+int Ccb_TreeStamp(lua_State* L)
+{
+    uint64_t h = 1469598103934665603ull;
+    StampWalk(luaL_checkstring(L, 1), "", h, 0);
+    char b[32]; snprintf(b, sizeof(b), "%016llx", (unsigned long long)h);
+    lua_pushstring(L, b);
+    return 1;
 }
 
 // kmod.boot_info() -> { safe=bool, crashes=n, last_crash=str, mods={id=true}, paks={name=true} }   (see kmod_boot.h)
@@ -2217,6 +2305,8 @@ void LuaHost_Init()
     lua_pushcfunction(L, Ccb_ReloadMods); lua_setfield(L, -2, "reload_mods");
     lua_pushcfunction(L, Ccb_Unzip); lua_setfield(L, -2, "unzip");
     lua_pushcfunction(L, Ccb_Rmtree); lua_setfield(L, -2, "rmtree");
+    lua_pushcfunction(L, Ccb_CopyTree); lua_setfield(L, -2, "copytree");
+    lua_pushcfunction(L, Ccb_TreeStamp); lua_setfield(L, -2, "tree_stamp");
     lua_pushcfunction(L, Ccb_ModApi); lua_setfield(L, -2, "mod_api");
     lua_pushcfunction(L, Kmod_Log); lua_setfield(L, -2, "log");
     lua_pushcfunction(L, Kmod_Signatures); lua_setfield(L, -2, "signatures");
@@ -2232,7 +2322,8 @@ void LuaHost_Init()
     lua_newtable(L);
     lua_pushstring(L, ExternalFilesDir().c_str()); lua_setfield(L, -2, "files");        // legacy app files dir
     lua_pushstring(L, KModRoot().c_str()); lua_setfield(L, -2, "root");
-    lua_pushstring(L, ModsDir().c_str()); lua_setfield(L, -2, "mods");
+    lua_pushstring(L, ModsDir().c_str()); lua_setfield(L, -2, "mods");                 // kmod/mods: where users drop mods (shared storage)
+    lua_pushstring(L, KPrivateRoot().c_str()); lua_setfield(L, -2, "private");          // the app's private kmod folder: mods are loaded from <private>/mods
     lua_pushstring(L, DevDir().c_str()); lua_setfield(L, -2, "dev");
     lua_pushstring(L, KLogDir().c_str()); lua_setfield(L, -2, "logs");
     lua_setfield(L, -2, "paths");

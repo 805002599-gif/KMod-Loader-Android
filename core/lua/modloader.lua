@@ -1,15 +1,16 @@
--- kmod built-in mod loader (runs as a built-in script, owner ""). Implements the mod pack format v1:
---   kmod/mods/<id>/{mod.json, main.lua, lang/<tag>.json}   installed packages (read only)
+-- kmod built-in mod loader (runs as a built-in script, owner ""). Implements the mod pack format v1/v2:
+--   kmod/mods/<id>/{mod.json, main.lua, lang/<tag>.json}   mod folders AND .kmod packages dropped by the user (shared storage)
+--   <private>/mods/<id>/                                     what is actually loaded: kmod.sync_mods mirrors kmod/mods here
+--                                                            (folders copied, .kmod extracted); shared storage is not executable
 --   kmod/data/<id>/settings.json                           user settings
 --   kmod/state.json                                        {"enabled":[ids], "language":"auto"}
---   kmod/inbox/*.kmod                                      zip packages installed automatically
--- Public (kmod.*): api, json, paths, state helpers, scan_mods, load_mods, install_inbox, set_enabled, settings_get/set,
+-- Public (kmod.*): api, json, paths, state helpers, scan_mods, load_mods, sync_mods, set_enabled, settings_get/set,
 -- lang_current, game_language, rec_text, mod_title, setting_label, option_label, t.
 
 local P = kmod.paths
 P.root = P.root or (P.files .. "/kmod")        -- set natively: the shared media folder
 P.data = P.root .. "/data"
-P.inbox = P.root .. "/inbox"
+P.loaded = P.private .. "/mods"                -- the private copy that mods are loaded from
 P.state = P.root .. "/state.json"
 
 local function log(...) kmod.log("info", "loader", ...) end
@@ -125,11 +126,11 @@ function kmod.option_label(rec, s, value) return kmod.rec_text(rec, "settings." 
 -- strings of the manager UI itself
 local UI = {
   en = { mods = "Mods", version = "Version", enabled = "Enabled", language = "Language", status = "Status",
-         no_mods = "No mods found", no_mods_hint = "Put folders in kmod/mods or .kmod files in kmod/inbox", auto = "Auto (game language)" },
+         no_mods = "No mods found", no_mods_hint = "Put mod folders or .kmod files in kmod/mods", auto = "Auto (game language)" },
   ["zh-CN"] = { mods = "模组", version = "版本", enabled = "启用", language = "语言", status = "状态",
-                no_mods = "未找到模组", no_mods_hint = "把文件夹放进 kmod/mods，或把 .kmod 放进 kmod/inbox", auto = "自动（跟随游戏）" },
+                no_mods = "未找到模组", no_mods_hint = "把模组文件夹或 .kmod 文件放进 kmod/mods", auto = "自动（跟随游戏）" },
   ["zh-TW"] = { mods = "模組", version = "版本", enabled = "啟用", language = "語言", status = "狀態",
-                no_mods = "找不到模組", no_mods_hint = "把資料夾放進 kmod/mods，或把 .kmod 放進 kmod/inbox", auto = "自動（跟隨遊戲）" },
+                no_mods = "找不到模組", no_mods_hint = "把模組資料夾或 .kmod 檔案放進 kmod/mods", auto = "自動（跟隨遊戲）" },
 }
 function kmod.t(key)
   for _, tag in ipairs(langChain(kmod.lang_current())) do
@@ -279,7 +280,7 @@ local function readPlatforms(def, rec)
 end
 
 local function inspect(folder)
-  local rec = { folder = folder, dir = P.mods .. "/" .. folder, errors = {}, warnings = {} }
+  local rec = { folder = folder, dir = P.loaded .. "/" .. folder, errors = {}, warnings = {} }
   local def = {}
   local txt = readFile(rec.dir .. "/mod.json")
   if not txt then rec.errors[#rec.errors + 1] = "mod.json missing"
@@ -352,7 +353,7 @@ end
 
 function kmod.scan_mods()
   local list = {}
-  for _, e in ipairs(kmod.listdir(P.mods)) do
+  for _, e in ipairs(kmod.listdir(P.loaded)) do
     if e.dir then
       local rec = inspect(e.name)
       rec.status = kmod._status[rec.id]
@@ -413,11 +414,22 @@ local function migrate()
     end
   end
   if changed then saveState() end
+
+  -- the old kmod/inbox folder is gone: .kmod files left in it move to kmod/mods, and the folder is removed when it is empty
+  local oldInbox = P.root .. "/inbox"
+  if kmod.exists(oldInbox) then
+    for _, e in ipairs(kmod.listdir(oldInbox)) do
+      if not e.dir and e.name:lower():match("%.kmod$") and not kmod.exists(P.mods .. "/" .. e.name) then
+        if os.rename(oldInbox .. "/" .. e.name, P.mods .. "/" .. e.name) then log("moved " .. e.name .. " from the old inbox to mods") end
+      end
+    end
+    os.remove(oldInbox)                                           -- only succeeds when it is empty
+  end
 end
 
 -- ------------------------------------------------------------------ .kmod installation
 local function installOne(zipPath)
-  local tmp = P.inbox .. "/.tmp"
+  local tmp = P.loaded .. "/.tmp"
   kmod.rmtree(tmp); mkdirs(tmp)
   local ok, err = kmod.unzip(zipPath, tmp)
   if not ok then kmod.rmtree(tmp); return false, "unzip failed: " .. tostring(err) end
@@ -438,28 +450,67 @@ local function installOne(zipPath)
     end
   end
   if not kmod.exists(tmp .. "/main.lua") and type(def.native) ~= "string" then return fail("main.lua missing") end
-  local target = P.mods .. "/" .. def.id
+  local target = P.loaded .. "/" .. def.id
   if kmod.exists(target) then kmod.rmtree(target) end   -- upgrade = replace the package; data/ and state.json are untouched
   if not os.rename(tmp, target) then return fail("could not move package into mods/") end
   return true, def.id
 end
 
-function kmod.install_inbox()
-  local n = 0
-  for _, e in ipairs(kmod.listdir(P.inbox)) do
-    if not e.dir and e.name:lower():match("%.kmod$") then
-      local path = P.inbox .. "/" .. e.name
-      local ok, res = installOne(path)
-      if ok then os.remove(path); n = n + 1; log("installed " .. res .. " from " .. e.name)
-      else
-        mkdirs(P.inbox .. "/failed")
-        os.rename(path, P.inbox .. "/failed/" .. e.name)
-        writeFile(P.inbox .. "/failed/" .. e.name .. ".txt", tostring(res))
-        logw("install failed: " .. e.name .. ": " .. tostring(res))
+-- Mirrors kmod/mods (shared storage: mod folders and .kmod packages) into the private folder the mods are loaded from.
+-- Folders are copied when anything in them changed, .kmod files are extracted when the file changed; private copies whose source
+-- is gone are removed. A folder and a .kmod with the same id: the folder wins. Returns how many mods were added or updated.
+kmod.sync_errors = kmod.sync_errors or {}
+function kmod.sync_mods()
+  mkdirs(P.mods); mkdirs(P.loaded)
+  local stamps = P.loaded .. "/.stamps"
+  mkdirs(stamps)
+  local changed, present, keepStamp = 0, {}, {}
+  local entries = kmod.listdir(P.mods)
+  for _, e in ipairs(entries) do                                  -- 1. mod folders
+    if e.dir then
+      local src, dst = P.mods .. "/" .. e.name, P.loaded .. "/" .. e.name
+      local sf = "dir_" .. e.name .. ".txt"
+      keepStamp[sf] = true; present[e.name] = true
+      local st = kmod.tree_stamp(src)
+      if readFile(stamps .. "/" .. sf) ~= st or not kmod.exists(dst) then
+        kmod.rmtree(dst)
+        local ok, err = kmod.copytree(src, dst)
+        if ok then writeFile(stamps .. "/" .. sf, st); changed = changed + 1; log("synced " .. e.name)
+        else logw("could not copy " .. e.name .. ": " .. tostring(err)); kmod.rmtree(dst); present[e.name] = nil end
       end
     end
   end
-  return n
+  for _, e in ipairs(entries) do                                  -- 2. .kmod packages
+    if not e.dir and e.name:lower():match("%.kmod$") then
+      local src = P.mods .. "/" .. e.name
+      local sf = "kmod_" .. e.name .. ".txt"
+      keepStamp[sf] = true
+      local st = kmod.tree_stamp(src)
+      local saved = readFile(stamps .. "/" .. sf) or ""
+      local savedStamp, savedId = saved:match("^([^\n]*)\n?(.*)$")
+      if savedStamp == st and savedId ~= "" and (savedId:sub(1, 7) == "failed:" or kmod.exists(P.loaded .. "/" .. savedId)) then
+        if savedId:sub(1, 7) == "failed:" then kmod.sync_errors[e.name] = savedId:sub(8)
+        elseif present[savedId] then logw(e.name .. ": a folder with the same id exists; the folder is used")
+        else present[savedId] = true end
+      else
+        local ok, res = installOne(src)
+        if ok then
+          if present[res] and kmod.exists(P.mods .. "/" .. res) then logw(e.name .. ": a folder with the same id (" .. res .. ") exists; the folder is used")
+          else writeFile(stamps .. "/" .. sf, st .. "\n" .. res); present[res] = true; changed = changed + 1; kmod.sync_errors[e.name] = nil; log("extracted " .. res .. " from " .. e.name) end
+        else
+          writeFile(stamps .. "/" .. sf, st .. "\nfailed:" .. tostring(res)); kmod.sync_errors[e.name] = tostring(res)
+          logw("cannot install " .. e.name .. ": " .. tostring(res))
+        end
+      end
+    end
+  end
+  for _, e in ipairs(kmod.listdir(P.loaded)) do                   -- 3. private copies whose source is gone
+    if e.dir and not present[e.name] then kmod.rmtree(P.loaded .. "/" .. e.name); log("removed " .. e.name .. " (no longer in kmod/mods)") end
+  end
+  for _, e in ipairs(kmod.listdir(stamps)) do
+    if not keepStamp[e.name] then os.remove(stamps .. "/" .. e.name) end
+  end
+  return changed
 end
 
 local lastLang = nil
@@ -527,7 +578,7 @@ local function loadOne(rec)
       else o.body = body end
       return httpRequest(o, cb)
     end,
-    -- Http.download(url, path [, opts], cb [, progress]): streams the body into a file inside kmod/data, inbox, paks or art.
+    -- Http.download(url, path [, opts], cb [, progress]): streams the body into a file inside kmod/data, mods, paks or art.
     -- cb(resp) with resp.saved / resp.size on success; progress(bytes, total) about 6 times a second (total = -1 if unknown)
     download = function(url, path, opts, cb, progress)
       if type(opts) == "function" then progress, cb, opts = cb, opts, nil end
@@ -615,9 +666,9 @@ function kmod.load_mods()
   kmod.refresh_boot()
   if kmod.boot.safe then logw("SAFE MODE: no mods are loaded; use the 'safe off' console command or the Mods page to leave it") end
   loadState()
-  mkdirs(P.data); mkdirs(P.inbox)
+  mkdirs(P.data); mkdirs(P.mods)
   migrate()
-  kmod.install_inbox()
+  kmod.sync_mods()
   kmod._status = {}
   kmod._events = {}
   kmod._net_conns = {}
