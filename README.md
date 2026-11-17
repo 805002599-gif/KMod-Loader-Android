@@ -6,11 +6,11 @@ A Lua mod loader for the card game KARDS on Android. Mods are Lua scripts that r
 - A Mods page inside the game's own Settings screen.
 - Logging, a crash handler, a command console and a developer build with a floating console.
 
-**Documentation:** the `docs/` folder (Jekyll, ready for GitHub Pages): quick start, mod format, Lua API, console commands, debugging and building.
+**Documentation:** <https://kardswalker.github.io/kmod-docs/> (source: [kardswalker/kmod-docs](https://github.com/kardswalker/kmod-docs)): quick start, mod format, Lua API, C++ mods, console commands, debugging and building.
 
 ## Not included
 
-This repository contains only the loader's source. It does **not** contain the game, a patched APK, the game's C++ SDK dump, or any signing key. You need your own KARDS APK from an official source and your own SDK dump (Dumper-7 / MobileDumper-7); see `docs/building.md`. Do not distribute patched APKs.
+This repository contains only the loader's source. It does **not** contain the game, a patched APK, the game's C++ SDK dump, or any signing key. You need your own KARDS APK from an official source and your own SDK dump (Dumper-7 / MobileDumper-7); see the "Building the loader" page of the documentation. Do not distribute patched APKs.
 
 ## Layout
 
@@ -21,7 +21,7 @@ core/            libkmodcore.so: ProcessEvent hook, Lua VM, reflection, logging
 core/lua/        modloader.lua, modmanager.lua (Mods page), commands.lua (console commands)
 overlay/         developer-build floating console (Java)
 tools/           DexTool (patches SplashActivity), repack.py
-docs/            documentation
+(documentation: https://github.com/kardswalker/kmod-docs)
 ```
 
 KARDS is a trademark of its owners; this project is not affiliated with or endorsed by them.
