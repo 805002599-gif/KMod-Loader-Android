@@ -23,7 +23,7 @@ core/            libkmodcore.so: ProcessEvent hook, Lua VM, reflection, logging
 core/lua/        modloader.lua, modmanager.lua (Mods page), commands.lua (console commands)
 overlay/         developer-build floating console (Java)
 tools/           DexTool (patches SplashActivity), repack.py
-(documentation: https://github.com/kardswalker/kmod-docs)
+(documentation: https://github.com/CCB-TEAM/kmod-docs)
 ```
 
 KARDS is a trademark of its owners; this project is not affiliated with or endorsed by them.
