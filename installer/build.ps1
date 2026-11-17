@@ -19,6 +19,13 @@ $env:JAVA_HOME = Split-Path -Parent $jbr
 & "$bt\aapt2.exe" link -o "$build\base.apk" --manifest "$t\AndroidManifest.xml" -I $jar --min-sdk-version 26 --target-sdk-version 34 -A "$build\assets" "$build\res.zip"
 python -I -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'a'); z.write(sys.argv[2],'classes.dex'); z.close()" "$build\base.apk" "$build\classes.dex"
 & "$bt\zipalign.exe" -p -f 4 "$build\base.apk" "$build\aligned.apk"
-$ks = "$t\..\dev.keystore"
-& "$bt\apksigner.bat" sign --ks $ks --ks-pass pass:android --key-pass pass:android --ks-key-alias dev --out "$t\kmod-installer.apk" "$build\aligned.apk" 2>&1 | Where-Object { $_ -notmatch 'WARNING' }
+# Release builds are signed with installer\release.keystore (password and alias in installer\release-key.txt; both are git-ignored and
+# must be backed up: an app signed with another key cannot update an installed one). Without them the debug key ..\dev.keystore is used.
+$relKs = "$t\release.keystore"; $relInfo = "$t\release-key.txt"
+if ((Test-Path $relKs) -and (Test-Path $relInfo)) {
+  $kv = @{}; Get-Content $relInfo | ForEach-Object { $p = $_ -split '=', 2; if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] } }
+  & "$bt\apksigner.bat" sign --ks $relKs --ks-pass "pass:$($kv['password'])" --key-pass "pass:$($kv['password'])" --ks-key-alias $kv['alias'] --out "$t\kmod-installer.apk" "$build\aligned.apk" 2>&1 | Where-Object { $_ -notmatch 'WARNING' }
+} else {
+  & "$bt\apksigner.bat" sign --ks "$t\..\dev.keystore" --ks-pass pass:android --key-pass pass:android --ks-key-alias dev --out "$t\kmod-installer.apk" "$build\aligned.apk" 2>&1 | Where-Object { $_ -notmatch 'WARNING' }
+}
 Get-Item "$t\kmod-installer.apk" | Select-Object Name, Length
