@@ -6,7 +6,7 @@ A Lua mod loader for the card game KARDS on Android. Mods are Lua scripts that r
 - A Mods page inside the game's own Settings screen.
 - Logging, a crash handler, a command console and a developer build with a floating console.
 
-**Documentation:** <https://kardswalker.github.io/kmod-docs/> (source: [kardswalker/kmod-docs](https://github.com/kardswalker/kmod-docs)): quick start, mod format, Lua API, C++ mods, console commands, debugging and building.
+**Documentation:** <https://kardswalker.github.io/kmod-docs/> (source: [CCB-TEAM/kmod-docs](https://github.com/CCB-TEAM/kmod-docs)): quick start, mod format, Lua API, C++ mods, console commands, debugging and building.
 
 ## Not included
 
