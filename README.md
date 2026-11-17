@@ -1,42 +1,29 @@
-# kmod mod template
+# kmod loader (Android)
 
-A starting point for a [kmod loader](https://kardswalker.github.io/kmod-docs/) mod (Lua).
+A Lua mod loader for the card game KARDS on Android. Mods are Lua scripts that read and call the game's own objects through Unreal's reflection system, and can load assets from the game's paks. No root is needed: the loader is added to the game's APK, which you rebuild and sign yourself.
+
+- Lua 5.4 mods, packaged as `.kmod` (a zip) with `mod.json`, settings, localization and versioned dependencies (`kmod>=0.2.0`, `kards>=1.61`).
+- A Mods page inside the game's own Settings screen.
+- Logging, a crash handler, a command console and a developer build with a floating console.
+
+**Documentation:** <https://kardswalker.github.io/kmod-docs/> (source: [kardswalker/kmod-docs](https://github.com/kardswalker/kmod-docs)): quick start, mod format, Lua API, C++ mods, console commands, debugging and building.
+
+## Not included
+
+This repository contains only the loader's source. It does **not** contain the game, a patched APK, the game's C++ SDK dump, or any signing key. You need your own KARDS APK from an official source and your own SDK dump (Dumper-7 / MobileDumper-7); see the "Building the loader" page of the documentation. Do not distribute patched APKs.
+
+## Layout
 
 ```
-my_mod/            the mod itself: rename the folder AND the "id" in mod.json (they must match)
-  mod.json         manifest: id, version, dependencies, settings
-  main.lua         the script (comments explain each part)
-  lang/            optional translations (en.json, zh-CN.json ...)
-tools/pack.py      check the mod and pack it into dist/<id>-<version>.kmod
-tools/push.py      copy the mod to the phone with adb and reload it (dev build)
-types/             type declarations for VS Code: kmod_api.lua is included, the game classes come from `typegen` (see below)
-.luarc.json        language server settings (points at ./types)
+build.ps1        build + repack + sign (-Flavor dev|release)
+loader/          libkmod.so: the shell loaded from SplashActivity
+core/            libkmodcore.so: ProcessEvent hook, Lua VM, reflection, logging
+core/lua/        modloader.lua, modmanager.lua (Mods page), commands.lua (console commands)
+overlay/         developer-build floating console (Java)
+tools/           DexTool (patches SplashActivity), repack.py
+(documentation: https://github.com/kardswalker/kmod-docs)
 ```
 
-## Set up VS Code (autocomplete for the whole game)
+KARDS is a trademark of its owners; this project is not affiliated with or endorsed by them.
 
-1. Install VS Code and the **Lua** extension by sumneko (this folder recommends it). `types/kmod_api.lua` already gives
-   completion for the kmod API (`Mod`, `Log`, `Settings`, `FindFirstOf`, `RegisterHook` ...).
-2. For the game's own classes: in the game (dev build) open the console and run `typegen`. Then copy the result here:
-   `adb pull /sdcard/Android/media/com.android1939.kardsapk/kmod/types .`
-   (or copy the `types` folder off the phone over USB). Blueprint UI classes only appear if their screen was open
-   when you ran `typegen`.
-3. Open this folder in VS Code. Typing `FindFirstOf("PlayerController")` now gives completion and type info, and typos
-   in property or function names are underlined.
-
-## Work cycle
-
-1. Edit `my_mod/main.lua` on the PC.
-2. `python tools/push.py my_mod` copies it to the phone, enables it and reloads (dev build must be running).
-3. Look at the output of `kmod/logs/kmod.log` on the phone, or `adb logcat -s KModCore KModLoader`.
-4. Explore the game from the dev console: `search`, `find`, `props`, `funcs`, `hook`.
-
-Without adb: copy the `my_mod` folder into `Android/media/com.android1939.kardsapk/kmod/mods/` by any means (file manager,
-USB), then press **Mods** in the game settings (or type `reload` in the dev console) and tick the mod.
-
-## Share it
-
-`python tools/pack.py my_mod` writes `dist/my_mod-0.1.0.kmod`. Players put that file into
-`Android/media/com.android1939.kardsapk/kmod/inbox/`; it installs on the next start or when the Mods page opens.
-
-Docs: https://kardswalker.github.io/kmod-docs/
+Licensed under the MIT License (see `LICENSE`). Lua is MIT-licensed; the build currently takes its sources from UE4SS's `deps/first/LuaRaw` (MIT).
